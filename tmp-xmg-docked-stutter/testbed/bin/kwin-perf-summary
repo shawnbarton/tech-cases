@@ -19,7 +19,7 @@ import sys
 
 
 def summarize(path, t_from=None, t_to=None):
-    late = total = missed = 0
+    late = total = missed = vrr = 0
     render = []
     try:
         f = open(path, newline="")
@@ -42,13 +42,15 @@ def summarize(path, t_from=None, t_to=None):
             if (t_from is not None and target < t_from) or (t_to is not None and target > t_to):
                 continue
             total += 1
+            if row.get("vrr") == "1":
+                vrr += 1
             delay = flip - target
             if delay > refresh / 2:
                 late += 1
                 missed += round(delay / refresh)
             if end > start:
                 render.append((end - start) / refresh)
-    out = {"file": path, "frames": total, "late": late, "missed": missed}
+    out = {"file": path, "frames": total, "late": late, "missed": missed, "vrr": vrr}
     if total:
         out["late_pct"] = 100 * late / total
     if render:
@@ -95,7 +97,7 @@ def main(argv):
             continue
         if tsv:
             print("\t".join([name, str(s["frames"]), str(s["late"]), f"{s.get('late_pct', 0):.1f}", str(s["missed"]),
-                             f"{100 * s.get('render_p95', 0):.0f}", f"{100 * s.get('render_max', 0):.0f}"]))
+                             f"{100 * s.get('render_p95', 0):.0f}", f"{100 * s.get('render_max', 0):.0f}", str(s["vrr"])]))
         elif not s["frames"]:
             print(f"{name}: no frames")
         else:
@@ -103,6 +105,8 @@ def main(argv):
             if "render_median" in s:
                 line += (f", render time median {s['render_median']:.0%} / p95 {s['render_p95']:.0%}"
                          f" / max {s['render_max']:.0%} of a refresh")
+            if s["vrr"]:
+                line += f", {s['vrr']} frames with adaptive sync (triple buffering is off for those)"
             print(line)
     return 0
 

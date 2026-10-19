@@ -25,9 +25,18 @@ KD_REQUIRE_LID_CLOSED=1
 # on from 6.7.3). It only engages with Adaptive Sync set to Never.
 KD_TRIPLE_BUFFERING=
 
+# KWin's safety margin before each vblank, in microseconds (KWin default 1000).
+# Raising it (e.g. 3000) gives slow commits more time. Empty = KWin default.
+KD_SAFETY_MARGIN=
+
 # 1 = write per-output frame timing CSVs ("kwin perf statistics <output>.csv")
 # to the home directory for kwin-perf-summary. KWin overwrites them at each login.
 KD_PERF_LOG=
+
+# Plasma copies the session environment into the systemd user manager, so a value
+# removed here could survive from an earlier login. Clear what this file manages.
+systemctl --user unset-environment KWIN_DRM_DEVICES KWIN_DRM_DISABLE_TRIPLE_BUFFERING \
+    KWIN_DRM_OVERRIDE_SAFETY_MARGIN KWIN_LOG_PERFORMANCE_DATA >/dev/null 2>&1
 
 kd_nv=/dev/dri/by-path/pci-0000:01:00.0-card
 kd_ig=/dev/dri/by-path/pci-0000:00:02.0-card
@@ -71,8 +80,13 @@ if [ -n "$kd_docked" ]; then
     esac
 fi
 
+case $KD_SAFETY_MARGIN in
+    ''|*[!0-9]*) ;;
+    *) if [ -n "$kd_docked" ]; then export KWIN_DRM_OVERRIDE_SAFETY_MARGIN="$KD_SAFETY_MARGIN"; fi ;;
+esac
+
 if [ "$KD_PERF_LOG" = 1 ]; then
     export KWIN_LOG_PERFORMANCE_DATA=1
 fi
 
-unset kd_nv kd_ig kd_card kd_s kd_docked kd_ok kd_ver kd_lib kd_l kd_list KD_GPU KD_REQUIRE_LID_CLOSED KD_TRIPLE_BUFFERING KD_PERF_LOG
+unset kd_nv kd_ig kd_card kd_s kd_docked kd_ok kd_ver kd_lib kd_l kd_list KD_GPU KD_REQUIRE_LID_CLOSED KD_TRIPLE_BUFFERING KD_SAFETY_MARGIN KD_PERF_LOG

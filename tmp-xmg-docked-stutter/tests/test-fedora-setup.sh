@@ -1,0 +1,71 @@
+#!/bin/bash
+# Test the Fedora setup scripts against fake dnf/rpm/akmods/modinfo/mokutil/systemctl.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+SETUP=$HERE/../testbed/setup
+T=$(mktemp -d "${TMPDIR:-/tmp}/fed.XXXXXX")
+mkdir -p "$T/bin" "$T/etc/rpm" "$T/etc/modprobe.d" "$T/etc/pki/akmods/certs" "$T/mods" \
+         "$T/modules/7.2.10-200.fc44.x86_64/build" "$T/modules/7.2.11-200.fc44.x86_64/build"
+LOG=$T/calls
+cat > "$T/bin/fake" <<EOS
+#!/bin/bash
+# One fake for every tool; behaviour by name.
+T="$T"; LOG="$LOG"; me=\$(basename "\$0")
+case \$me in
+  sudo) [ "\$1" = -n ] && shift; exec "\$@" ;;
+  uname) echo 7.2.10-200.fc44.x86_64 ;;
+  rpm) case \$1 in
+         -q) shift; rc=0; for p in "\$@"; do grep -qx "\$p" "\$T/installed" 2>/dev/null || rc=1; done; exit \$rc ;;
+         -qa) cat "\$T/installed" 2>/dev/null ;;
+       esac ;;
+  dnf) echo "dnf \$*" >> "\$LOG"
+       if [ "\$1" = install ]; then
+         # like --allowerasing: installing one NVIDIA branch removes the other
+         case "\$*" in *580xx*) sed -i '/nvidia/{/580xx/!d}' "\$T/installed" 2>/dev/null ;; *akmod-nvidia*) sed -i '/580xx/d' "\$T/installed" 2>/dev/null ;; esac
+         for a in "\$@"; do case \$a in -*|install) ;; *) grep -qx "\$a" "\$T/installed" 2>/dev/null || echo "\$a" >> "\$T/installed" ;; esac; done
+       fi ;;
+  akmods) echo "akmods \$*" >> "\$LOG"
+       k=\${!#}
+       lic="Dual MIT/GPL"; grep -q without_kmod_nvidia_detect "\$T/etc/rpm/macros.nvidia-kmod" 2>/dev/null && lic=NVIDIA
+       [ -e "\$T/ignore-macro" ] && lic="Dual MIT/GPL"
+       ver=615.78.08; grep -q 580xx "\$T/installed" 2>/dev/null && ver=580.178.04
+       printf '%s\n%s\n' "\$ver" "\$lic" > "\$T/mods/\$k" ;;
+  modinfo) if [ "\$1" = -k ]; then k=\$2; shift 2; else k=7.2.10-200.fc44.x86_64; fi
+       f=\$2
+       case \$f in
+         version) sed -n 1p "\$T/mods/\$k" 2>/dev/null ;;
+         license) sed -n 2p "\$T/mods/\$k" 2>/dev/null ;;
+         parm) echo "modeset:Enable modesetting (bool)"; echo "vblank:Use vblank events (bool)" ;;
+       esac ;;
+  mokutil) case \$1 in
+         --sb-state) cat "\$T/sb" 2>/dev/null || echo "SecureBoot disabled" ;;
+         --test-key) [ -e "\$T/enrolled" ] && echo "\$2 is already enrolled" || echo "\$2 is not enrolled" ;;
+       esac ;;
+  systemctl) echo "systemctl \$*" >> "\$LOG"
+       case \$1 in show) echo plasmalogin.service ;; is-enabled) echo enabled ;; is-active) echo active ;; esac ;;
+  *) echo "\$me \$*" >> "\$LOG" ;;
+esac
+exit 0
+EOS
+chmod +x "$T/bin/fake"
+for t in sudo uname rpm dnf akmods modinfo mokutil systemctl dracut boltctl kscreen-doctor powerprofilesctl; do ln -s fake "$T/bin/$t"; done
+export PATH="$T/bin:$PATH" SETUP_ASSUME_FEDORA=44 SETUP_ETC="$T/etc" SETUP_MODULES="$T/modules" SETUP_ALLOW_ROOT=1
+F=$SETUP/fedora
+show() { sed "s#$T##g"; }
+step() { : > "$LOG"; echo "################ $*"; }
+calls() { echo "-- calls:"; show < "$LOG"; }
+files() { echo "-- macro: $(cat "$T/etc/rpm/macros.nvidia-kmod" 2>/dev/null || echo none) | gsp: $(cat "$T/etc/modprobe.d/zz-nvidia-gsp.conf" 2>/dev/null || echo none)"; }
+
+step "01-base.sh (dry run)"; DRYRUN=1 bash "$F/01-base.sh" 2>&1 | grep -E 'dry-run|==>' | show
+step "02-nvidia.sh open"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E '==>|nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; files; calls
+step "02-nvidia.sh closed-gsp-off"; bash "$F/02-nvidia.sh" closed-gsp-off 2>&1 | grep -E 'nvidia [0-9]|error|N/A' | show; echo "exit ${PIPESTATUS[0]}"; files
+step "02-nvidia.sh legacy-open (branch switch)"; bash "$F/02-nvidia.sh" legacy-open 2>&1 | grep -E 'nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; files; grep '^dnf' "$LOG" | show
+step "02-nvidia.sh open again (back from legacy)"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E 'nvidia [0-9]|error' | show; files
+step "akmods ignores the macro -> must fail"; touch "$T/ignore-macro"; bash "$F/02-nvidia.sh" closed 2>&1 | grep -E 'error|nvidia [0-9]' | show; echo "exit ${PIPESTATUS[0]}"; rm -f "$T/ignore-macro"
+step "Secure Boot on, key not enrolled -> stop before building"; echo "SecureBoot enabled" > "$T/sb"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E 'Secure Boot is on|kmodgenca' | show; echo "exit ${PIPESTATUS[0]}"; grep -c '^akmods' "$LOG" | sed 's/^/akmods calls: /'
+step "Secure Boot on, key enrolled -> builds"; touch "$T/enrolled" "$T/etc/pki/akmods/certs/public_key.der"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E 'nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; rm -f "$T/sb" "$T/enrolled"
+step "02-nvidia.sh status"; bash "$F/02-nvidia.sh" status 2>&1 | show | head -12
+step "02-nvidia.sh bogus"; bash "$F/02-nvidia.sh" bogus >/dev/null 2>&1; echo "exit $?"
+step "knobs.sh vblank on / status / off, powerd off"; bash "$F/knobs.sh" vblank on 2>&1 | show; bash "$F/knobs.sh" status 2>&1 | show; bash "$F/knobs.sh" vblank off | show; bash "$F/knobs.sh" powerd off; calls
+step "03-sessions.sh (dry run)"; DRYRUN=1 bash "$F/03-sessions.sh" 2>&1 | grep -E 'dry-run|login manager' | show
+step "install-testbed.sh (dry run, not in a Plasma session)"; HOME=$T/home DRYRUN=1 bash "$SETUP/install-testbed.sh" 2>&1 | grep -E 'dry-run|==>|run inside|no external' | show

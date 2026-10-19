@@ -5,7 +5,7 @@
 #   stuttertest info                       save a system/driver/KWin state report
 #   stuttertest kwin show                  login-script settings vs. the running session
 #   stuttertest kwin install               install the login script into Plasma's env dir
-#   stuttertest kwin set KEY=VALUE...      gpu=default|nvidia  tb=default|on|off
+#   stuttertest kwin set KEY=VALUE...      gpu=default|nvidia  tb=default|on|off  margin=default|<us>
 #                                          perf=on|off  lidcheck=on|off   (then log out and in)
 #   stuttertest run NAME [options]         measure one test while you use the desktop
 #       --clock LIST   comma-separated: none, mem[=MHz], gr[=MHz], pm-consistent, pm-max, p0
@@ -44,6 +44,24 @@ kwin_support() {
 }
 render_gpu() { kwin_support | sed -n 's/.*OpenGL renderer string:[[:space:]]*//p' | head -1 | tr -d '"'; }
 
+module_type() {
+    case $(modinfo -F license nvidia 2>/dev/null) in
+        NVIDIA) echo closed ;;
+        '') echo none ;;
+        *) echo open ;;
+    esac
+}
+gsp_state() {
+    local v
+    v=$(nvidia-smi -q 2>/dev/null | sed -n 's/^[[:space:]]*GSP Firmware Version[[:space:]]*:[[:space:]]*//p' | head -1)
+    case $v in ''|N/A) echo off ;; *) echo "on ($v)" ;; esac
+}
+drm_param() { cat "/sys/module/nvidia_drm/parameters/$1" 2>/dev/null || sudo -n cat "/sys/module/nvidia_drm/parameters/$1" 2>/dev/null || echo '?'; }
+power_profile() {
+    if have powerprofilesctl; then powerprofilesctl get 2>/dev/null; elif have tuned-adm; then tuned-adm active 2>/dev/null | sed 's/.*: //'; else echo '?'; fi
+}
+powerd_state() { systemctl is-active nvidia-powerd.service 2>/dev/null || true; }
+
 docked() {
     local c
     for c in /sys/bus/pci/devices/"$NV_PCI"/drm/card*/card*-*; do
@@ -73,7 +91,9 @@ cmd_info() {
         nvidia-smi --query-gpu=name,driver_version,pstate,clocks.mem,clocks.gr,power.draw,pcie.link.gen.current,pcie.link.width.current --format=csv 2>&1
         nvidia-smi -q 2>/dev/null | grep -i -A1 'GSP Firmware'
         grep -E 'EnableGpuFirmware|DynamicPowerManagement|PreserveVideoMemoryAllocations|UseKernelSuspendNotifiers|RegistryDwords' /proc/driver/nvidia/params 2>/dev/null
-        echo "modeset=$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null) fbdev=$(cat /sys/module/nvidia_drm/parameters/fbdev 2>/dev/null)"
+        echo "kernel module: $(module_type)   GSP: $(gsp_state)"
+        echo "nvidia_drm: modeset=$(drm_param modeset) fbdev=$(drm_param fbdev) vblank=$(drm_param vblank)"
+        echo "nvidia-powerd (Dynamic Boost): $(powerd_state)"
         echo "runtime PM: $(cat /sys/bus/pci/devices/$NV_PCI/power/control 2>/dev/null) / $(cat /sys/bus/pci/devices/$NV_PCI/power/runtime_status 2>/dev/null)"
         systemctl is-enabled nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service nvidia-powerd.service 2>/dev/null | paste -sd' ' | sed 's/^/suspend\/resume\/hibernate\/powerd services: /'
         [ -e /run/nvidia-clockfloor.state ] && echo "nvidia-clockfloor active: $(cat /run/nvidia-clockfloor.state)"
@@ -85,12 +105,16 @@ cmd_info() {
         echo; echo "== KWin session"
         echo "render GPU: $(render_gpu)"
         echo "KWIN_* in running KWin:"; kwin_env | sed 's/^/  /'
+        echo "KWIN_* in systemd user environment:"; systemctl --user show-environment 2>/dev/null | grep '^KWIN_' | sed 's/^/  /'
         echo "login script: $( [ -e "$ENVFILE" ] && grep '^KD_' "$ENVFILE" | paste -sd' ' || echo 'not installed')"
         echo; echo "== Possible GPU pollers running"
         pgrep -a -f 'nvtop|mangohud|nvidia-smi|gwe|coolercontrol|tuxedo-control-center|btop' | grep -v pgrep || echo "  none found"
-        echo; echo "== Power"
+        echo; echo "== Power and platform"
         sed 's/^/platform profile: /' /sys/firmware/acpi/platform_profile 2>/dev/null
-        have powerprofilesctl && powerprofilesctl get 2>/dev/null | sed 's/^/power profile: /'
+        echo "power profile: $(power_profile)"
+        echo "CPU microcode: $(grep -m1 microcode /proc/cpuinfo | sed 's/.*: //')"
+        echo "DMI: $(cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/board_name /sys/class/dmi/id/bios_version 2>/dev/null | paste -sd' ')"
+        have mokutil && mokutil --sb-state 2>/dev/null
         have boltctl && boltctl list 2>/dev/null | grep -E 'name|status|authflags'
     } 2>&1 | tee "$out"
     echo; echo "saved: $out"
@@ -124,7 +148,10 @@ cmd_kwin() {
                     perf=off) var=KD_PERF_LOG; val= ;;
                     lidcheck=on) var=KD_REQUIRE_LID_CLOSED; val=1 ;;
                     lidcheck=off) var=KD_REQUIRE_LID_CLOSED; val= ;;
-                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off perf=on|off lidcheck=on|off)" ;;
+                    margin=default) var=KD_SAFETY_MARGIN; val= ;;
+                    margin=[0-9]*) case $v in *[!0-9]*) die "margin must be microseconds: '$v'" ;; esac
+                                   var=KD_SAFETY_MARGIN; val=$v ;;
+                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off margin=default|<us> perf=on|off lidcheck=on|off)" ;;
                 esac
                 sed -i "s/^$var=.*/$var=$val/" "$ENVFILE"
             done
@@ -241,14 +268,20 @@ cmd_run() {
     rd=$(printf '%s/runs/%03d-%s' "$DATA" $((n + 1)) "$name")
     mkdir -p "$rd"
 
-    local tb gpu
+    local tb gpu margin kcfg drv gsp
     tb=$(kwin_env | sed -n 's/^KWIN_DRM_DISABLE_TRIPLE_BUFFERING=//p')
     case $tb in 0) tb=on ;; 1) tb=off ;; *) tb=default ;; esac
+    margin=$(kwin_env | sed -n 's/^KWIN_DRM_OVERRIDE_SAFETY_MARGIN=//p')
+    kcfg="tb=$tb${margin:+,margin=$margin}"
     gpu=$(render_gpu | cut -c1-40)
+    gsp=$(gsp_state)
+    drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)/$(module_type)/gsp-${gsp%% *}/vblank=$(drm_param vblank)"
     {
-        echo "name=$name"; echo "date=$(date -Is)"; echo "clock=$clock"; echo "tb=$tb"; echo "render_gpu=$gpu"
+        echo "name=$name"; echo "date=$(date -Is)"; echo "clock=$clock"; echo "kwin_config=$kcfg"; echo "render_gpu=$gpu"; echo "driver=$drv"
         echo "kwin=$(kwin_wayland --version 2>/dev/null)"; echo "driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"
         echo "kernel=$(uname -r)"; echo "docked=$(docked && echo yes || echo no)"; echo "ac=$(systemd-ac-power 2>/dev/null && echo yes || echo no)"
+        echo "gsp=$gsp"
+        echo "powerd=$(powerd_state)"; echo "power_profile=$(power_profile)"
         kwin_env | sed 's/^/env:/'
     } > "$rd/meta.txt"
 
@@ -346,18 +379,21 @@ EOF
 )
     fi
 
-    [ -e "$DATA/results.tsv" ] || printf 'run\tname\tclock\ttb\trender_gpu\toutput\tframes\tlate\tlate%%\tmissed\trender_p95%%\trender_max%%\trating\tpstates\n' > "$DATA/results.tsv"
+    [ -e "$DATA/results.tsv" ] || printf 'run\tname\tclock\tkwin\tdriver\trender_gpu\toutput\tframes\tlate\tlate%%\tmissed\trender_p95%%\trender_max%%\tvrr_frames\trating\tpstates\n' > "$DATA/results.tsv"
     echo
-    echo "=== $(basename "$rd")  clock=$clock  tb=$tb  gpu=$gpu  rating=$rating"
+    echo "=== $(basename "$rd")  clock=$clock  kwin=$kcfg  gpu=$gpu  driver=$drv  rating=$rating"
     local any='' line
     for f in "$rd"/perf-*.csv; do
         [ -e "$f" ] || continue
         any=1
         "$SUMMARY" "$f"
         line=$("$SUMMARY" --tsv "$f")
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(basename "$rd" | cut -d- -f1)" "$name" "$clock" "$tb" "$gpu" "$line" "$rating" "$pstates" >> "$DATA/results.tsv"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(basename "$rd" | cut -d- -f1)" "$name" "$clock" "$kcfg" "$drv" "$gpu" "$line" "$rating" "$pstates" >> "$DATA/results.tsv"
     done
     [ -n "$any" ] || echo "no KWin frame log found in $csvdir"
+    if grep -q ',1,[01],[0-9]*$' "$rd"/perf-*.csv 2>/dev/null; then
+        echo "note: some frames used adaptive sync; set Adaptive Sync to Never for triple-buffering comparisons"
+    fi
     [ "$pstates" != - ] && echo "nvidia-smi: $pstates"
     echo "saved: $rd"
 }
