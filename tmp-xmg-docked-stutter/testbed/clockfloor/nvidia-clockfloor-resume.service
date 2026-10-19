@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-apply NVIDIA clock floor after resume
+After=systemd-suspend.service systemd-hibernate.service systemd-hybrid-sleep.service systemd-suspend-then-hibernate.service nvidia-resume.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/touch /run/nvidia-clockfloor.stale
+ExecStart=/usr/bin/systemctl --no-block start nvidia-clockfloor.service
+
+[Install]
+WantedBy=systemd-suspend.service systemd-hibernate.service systemd-hybrid-sleep.service systemd-suspend-then-hibernate.service

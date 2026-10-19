@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Get or set the NVIDIA PowerMizer mode through NVML.
+
+Works under Wayland: it talks to libnvidia-ml directly instead of going
+through the NV-CONTROL X extension. Needs driver 580.65.06 or newer
+(nvmlDeviceSetPowerMizerMode_v1). Setting a mode normally needs root.
+
+  nv-powermizer                 show current and supported modes
+  nv-powermizer adaptive        driver default: clocks follow utilization
+  nv-powermizer max             prefer maximum performance
+  nv-powermizer consistent      lock to GPU base clocks
+  nv-powermizer auto            driver controlled
+  --index N                     GPU index (default 0)
+"""
+import ctypes
+import sys
+
+MODES = {"adaptive": 0, "max": 1, "auto": 2, "consistent": 3}
+NAMES = {v: k for k, v in MODES.items()}
+
+
+class PowerMizerModes(ctypes.Structure):
+    _fields_ = [
+        ("currentMode", ctypes.c_uint),
+        ("mode", ctypes.c_uint),
+        ("supportedPowerMizerModes", ctypes.c_uint),
+    ]
+
+
+def main(argv):
+    index = 0
+    if "--index" in argv:
+        i = argv.index("--index")
+        if i + 1 >= len(argv) or not argv[i + 1].isdigit():
+            print(__doc__.strip())
+            return 2
+        index = int(argv[i + 1])
+        del argv[i:i + 2]
+    if any(a in ("-h", "--help") for a in argv) or len(argv) > 1 or (argv and argv[0] not in MODES):
+        print(__doc__.strip())
+        return 0 if any(a in ("-h", "--help") for a in argv) else 2
+
+    try:
+        nvml = ctypes.CDLL("libnvidia-ml.so.1")
+    except OSError as e:
+        print(f"cannot load libnvidia-ml.so.1: {e}", file=sys.stderr)
+        return 1
+    nvml.nvmlErrorString.restype = ctypes.c_char_p
+
+    def check(ret, what):
+        if ret != 0:
+            raise RuntimeError(f"{what}: {nvml.nvmlErrorString(ret).decode()} (code {ret})")
+
+    get_mode = getattr(nvml, "nvmlDeviceGetPowerMizerMode_v1", None)
+    set_mode = getattr(nvml, "nvmlDeviceSetPowerMizerMode_v1", None)
+    if get_mode is None or set_mode is None:
+        print("this NVML has no PowerMizer API (needs driver 580.65.06+)", file=sys.stderr)
+        return 1
+
+    ret = nvml.nvmlInit_v2()
+    if ret != 0:
+        print(f"nvmlInit: {nvml.nvmlErrorString(ret).decode()} (code {ret})", file=sys.stderr)
+        return 1
+    try:
+        dev = ctypes.c_void_p()
+        check(nvml.nvmlDeviceGetHandleByIndex_v2(index, ctypes.byref(dev)), f"GPU {index}")
+
+        if argv:
+            pm = PowerMizerModes(mode=MODES[argv[0]])
+            check(set_mode(dev, ctypes.byref(pm)), f"set {argv[0]}")
+
+        pm = PowerMizerModes()
+        check(get_mode(dev, ctypes.byref(pm)), "get mode")
+        supported = [n for v, n in sorted(NAMES.items()) if pm.supportedPowerMizerModes & (1 << v)]
+        print(f"current: {NAMES.get(pm.currentMode, pm.currentMode)}")
+        print(f"supported: {' '.join(supported) or 'none reported'}")
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+    finally:
+        nvml.nvmlShutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

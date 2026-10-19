@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Summarize KWin frame timing CSVs ("kwin perf statistics <output>.csv").
+
+KWin writes them when it runs with KWIN_LOG_PERFORMANCE_DATA=1 (stuttertest
+kwin set perf=on). Usage:
+  kwin-perf-summary [--from NS] [--to NS] [--tsv] FILE...
+--from/--to keep only frames whose target pageflip time (CLOCK_MONOTONIC, ns)
+falls in that window; stuttertest uses this to cut out one test.
+
+A frame is "late" when it was presented more than half a refresh after the
+time KWin targeted. "missed" counts the refresh cycles lost to late frames.
+Render time includes the multi-GPU copy. KWin overwrites the files at every
+login, and the last row may be incomplete while KWin runs (it is skipped).
+"""
+import csv
+import os
+import statistics
+import sys
+
+
+def summarize(path, t_from=None, t_to=None):
+    late = total = missed = 0
+    render = []
+    try:
+        f = open(path, newline="")
+    except OSError as e:
+        return {"file": path, "error": e.strerror}
+    with f:
+        for row in csv.DictReader(f):
+            if None in row or None in row.values():  # partially written row
+                continue
+            try:
+                target = int(row["target pageflip timestamp"])
+                flip = int(row["pageflip timestamp"])
+                start = int(row["render start"])
+                end = int(row["render end"])
+                refresh = int(row["refresh duration"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if not 1_000_000 <= refresh <= 1_000_000_000:  # outside 1 ms..1 s: corrupt row
+                continue
+            if (t_from is not None and target < t_from) or (t_to is not None and target > t_to):
+                continue
+            total += 1
+            delay = flip - target
+            if delay > refresh / 2:
+                late += 1
+                missed += round(delay / refresh)
+            if end > start:
+                render.append((end - start) / refresh)
+    out = {"file": path, "frames": total, "late": late, "missed": missed}
+    if total:
+        out["late_pct"] = 100 * late / total
+    if render:
+        render.sort()
+        out["render_median"] = statistics.median(render)
+        out["render_p95"] = render[min(len(render) - 1, int(0.95 * len(render)))]
+        out["render_max"] = render[-1]
+    return out
+
+
+def output_name(path):
+    base = os.path.basename(path)
+    prefix = "kwin perf statistics "
+    if base.startswith(prefix):
+        base = base[len(prefix):]
+    return base[:-4] if base.endswith(".csv") else base
+
+
+def main(argv):
+    t_from = t_to = None
+    tsv = False
+    files = []
+    it = iter(argv)
+    for a in it:
+        if a == "--from":
+            t_from = int(next(it))
+        elif a == "--to":
+            t_to = int(next(it))
+        elif a == "--tsv":
+            tsv = True
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            files.append(a)
+    if not files:
+        print(__doc__.strip())
+        return 2
+    for p in files:
+        s = summarize(p, t_from, t_to)
+        name = output_name(p)
+        if "error" in s:
+            print(f"{name}\tERROR\t{s['error']}" if tsv else f"{p}: cannot read ({s['error']})")
+            continue
+        if tsv:
+            print("\t".join([name, str(s["frames"]), str(s["late"]), f"{s.get('late_pct', 0):.1f}", str(s["missed"]),
+                             f"{100 * s.get('render_p95', 0):.0f}", f"{100 * s.get('render_max', 0):.0f}"]))
+        elif not s["frames"]:
+            print(f"{name}: no frames")
+        else:
+            line = f"{name}: {s['frames']} frames, {s['late']} late ({s['late_pct']:.1f}%), {s['missed']} refreshes missed"
+            if "render_median" in s:
+                line += (f", render time median {s['render_median']:.0%} / p95 {s['render_p95']:.0%}"
+                         f" / max {s['render_max']:.0%} of a refresh")
+            print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

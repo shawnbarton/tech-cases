@@ -1,0 +1,5 @@
+# Re-evaluate the NVIDIA clock floor when the power source, a display on the
+# NVIDIA GPU, or the Thunderbolt dock changes.
+SUBSYSTEM=="power_supply", ACTION=="change", ATTR{type}!="Battery", RUN+="/usr/bin/systemctl --no-block start nvidia-clockfloor.service"
+SUBSYSTEM=="drm", ACTION=="change", KERNEL=="card[0-9]*", ENV{HOTPLUG}=="1", KERNELS=="0000:01:00.0", RUN+="/usr/bin/systemctl --no-block start nvidia-clockfloor.service"
+SUBSYSTEM=="thunderbolt", ACTION=="add|remove", ENV{DEVTYPE}=="thunderbolt_device", RUN+="/usr/bin/systemctl --no-block start nvidia-clockfloor.service"

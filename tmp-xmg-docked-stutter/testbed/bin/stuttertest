@@ -1,0 +1,377 @@
+#!/bin/bash
+# stuttertest: run and record docked-stutter experiments on KDE Plasma (KWin)
+# with an NVIDIA GPU driving the external monitors.
+#
+#   stuttertest info                       save a system/driver/KWin state report
+#   stuttertest kwin show                  login-script settings vs. the running session
+#   stuttertest kwin install               install the login script into Plasma's env dir
+#   stuttertest kwin set KEY=VALUE...      gpu=default|nvidia  tb=default|on|off
+#                                          perf=on|off  lidcheck=on|off   (then log out and in)
+#   stuttertest run NAME [options]         measure one test while you use the desktop
+#       --clock LIST   comma-separated: none, mem[=MHz], gr[=MHz], pm-consistent, pm-max, p0
+#       --smi          also log nvidia-smi P-state/clocks every 500 ms (adds GPU polling)
+#       --duration N   stop after N seconds instead of waiting for Enter
+#       --force        run even if the nvidia-clockfloor service holds a lock
+#   stuttertest report                     table of all runs
+#   stuttertest reset                      undo any clock lock, PowerMizer mode or P0 load
+#
+# Results go to ~/stuttertest (override with STUTTERTEST_DIR).
+set -u
+
+HERE=$(dirname "$(readlink -f "$0")")
+DATA=${STUTTERTEST_DIR:-$HOME/stuttertest}
+ENVFILE=$HOME/.config/plasma-workspace/env/50-kwin-docked-gpu.sh
+ENVSRC=$HERE/../kwin/50-kwin-docked-gpu.sh
+SUMMARY=$HERE/kwin-perf-summary
+POWERMIZER=$HERE/nv-powermizer
+DGPU_RUN=$HERE/dgpu-run
+NV_PCI=0000:01:00.0
+SMI_ID=0
+
+die() { echo "stuttertest: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+mono_ns() { python3 -c 'import time; print(time.monotonic_ns())'; }
+kwin_pid() { pidof -s kwin_wayland; }
+kwin_env() { local p; p=$(kwin_pid) || return 1; tr '\0' '\n' < "/proc/$p/environ" | grep '^KWIN_' || true; }
+kwin_csv_dir() { local p; p=$(kwin_pid) && readlink "/proc/$p/cwd"; }
+
+kwin_support() {
+    if have dbus-send; then
+        dbus-send --session --print-reply --dest=org.kde.KWin /KWin org.kde.KWin.supportInformation 2>/dev/null
+    elif have qdbus6; then
+        qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation 2>/dev/null
+    fi
+}
+render_gpu() { kwin_support | sed -n 's/.*OpenGL renderer string:[[:space:]]*//p' | head -1 | tr -d '"'; }
+
+docked() {
+    local c
+    for c in /sys/bus/pci/devices/"$NV_PCI"/drm/card*/card*-*; do
+        [ -r "$c/status" ] || continue
+        case ${c##*/} in *-eDP-*|*-LVDS-*|*-DSI-*) continue ;; esac
+        [ "$(cat "$c/status")" = connected ] && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------- info
+
+cmd_info() {
+    mkdir -p "$DATA"
+    local out
+    out="$DATA/info-$(date +%Y%m%d-%H%M%S).txt"
+    {
+        echo "== stuttertest info $(date -Is)"
+        grep -m1 PRETTY_NAME /etc/os-release
+        echo "kernel: $(uname -r)"
+        echo "cmdline: $(cat /proc/cmdline)"
+        kwin_wayland --version 2>/dev/null
+        plasmashell --version 2>/dev/null
+        Xwayland -version 2>&1 | grep -m1 -i version
+        echo; echo "== NVIDIA"
+        head -1 /proc/driver/nvidia/version 2>/dev/null
+        nvidia-smi --query-gpu=name,driver_version,pstate,clocks.mem,clocks.gr,power.draw,pcie.link.gen.current,pcie.link.width.current --format=csv 2>&1
+        nvidia-smi -q 2>/dev/null | grep -i -A1 'GSP Firmware'
+        grep -E 'EnableGpuFirmware|DynamicPowerManagement|PreserveVideoMemoryAllocations|UseKernelSuspendNotifiers|RegistryDwords' /proc/driver/nvidia/params 2>/dev/null
+        echo "modeset=$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null) fbdev=$(cat /sys/module/nvidia_drm/parameters/fbdev 2>/dev/null)"
+        echo "runtime PM: $(cat /sys/bus/pci/devices/$NV_PCI/power/control 2>/dev/null) / $(cat /sys/bus/pci/devices/$NV_PCI/power/runtime_status 2>/dev/null)"
+        systemctl is-enabled nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service nvidia-powerd.service 2>/dev/null | paste -sd' ' | sed 's/^/suspend\/resume\/hibernate\/powerd services: /'
+        [ -e /run/nvidia-clockfloor.state ] && echo "nvidia-clockfloor active: $(cat /run/nvidia-clockfloor.state)"
+        echo; echo "== Displays"
+        ls -l /dev/dri/by-path/
+        for s in /sys/class/drm/card*-*/status; do echo "${s%/status} $(cat "$s")"; done | sed 's#/sys/class/drm/##'
+        if have kscreen-doctor; then kscreen-doctor -o 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; fi
+        echo "docked: $(docked && echo yes || echo no)   AC: $(systemd-ac-power 2>/dev/null && echo yes || echo no)"
+        echo; echo "== KWin session"
+        echo "render GPU: $(render_gpu)"
+        echo "KWIN_* in running KWin:"; kwin_env | sed 's/^/  /'
+        echo "login script: $( [ -e "$ENVFILE" ] && grep '^KD_' "$ENVFILE" | paste -sd' ' || echo 'not installed')"
+        echo; echo "== Possible GPU pollers running"
+        pgrep -a -f 'nvtop|mangohud|nvidia-smi|gwe|coolercontrol|tuxedo-control-center|btop' | grep -v pgrep || echo "  none found"
+        echo; echo "== Power"
+        sed 's/^/platform profile: /' /sys/firmware/acpi/platform_profile 2>/dev/null
+        have powerprofilesctl && powerprofilesctl get 2>/dev/null | sed 's/^/power profile: /'
+        have boltctl && boltctl list 2>/dev/null | grep -E 'name|status|authflags'
+    } 2>&1 | tee "$out"
+    echo; echo "saved: $out"
+}
+
+# ---------------------------------------------------------------- kwin
+
+cmd_kwin() {
+    local sub=${1:-show}; shift || true
+    case $sub in
+        install)
+            [ -r "$ENVSRC" ] || die "missing $ENVSRC"
+            mkdir -p "$(dirname "$ENVFILE")"
+            if [ -e "$ENVFILE" ] && [ "${1:-}" != --force ]; then
+                echo "already installed: $ENVFILE (use: stuttertest kwin install --force to overwrite)"
+            else
+                install -m 0644 "$ENVSRC" "$ENVFILE" && echo "installed: $ENVFILE (all options off)"
+            fi ;;
+        set)
+            [ -e "$ENVFILE" ] || cmd_kwin install
+            local kv k v var val
+            for kv in "$@"; do
+                k=${kv%%=*}; v=${kv#*=}
+                case $k=$v in
+                    gpu=default) var=KD_GPU; val= ;;
+                    gpu=nvidia) var=KD_GPU; val=nvidia ;;
+                    tb=default) var=KD_TRIPLE_BUFFERING; val= ;;
+                    tb=on) var=KD_TRIPLE_BUFFERING; val=1 ;;
+                    tb=off) var=KD_TRIPLE_BUFFERING; val=0 ;;
+                    perf=on) var=KD_PERF_LOG; val=1 ;;
+                    perf=off) var=KD_PERF_LOG; val= ;;
+                    lidcheck=on) var=KD_REQUIRE_LID_CLOSED; val=1 ;;
+                    lidcheck=off) var=KD_REQUIRE_LID_CLOSED; val= ;;
+                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off perf=on|off lidcheck=on|off)" ;;
+                esac
+                sed -i "s/^$var=.*/$var=$val/" "$ENVFILE"
+            done
+            cmd_kwin show
+            echo "-> log out and back in (docked) to apply." ;;
+        show)
+            echo "login script ($ENVFILE):"
+            if [ -e "$ENVFILE" ]; then grep '^KD_' "$ENVFILE" | sed 's/^/  /'; else echo "  not installed (stuttertest kwin install)"; fi
+            echo "running KWin:"
+            local e; e=$(kwin_env)
+            if [ -n "$e" ]; then echo "  ${e//$'\n'/$'\n'  }"; else echo "  no KWIN_* variables"; fi
+            echo "  render GPU: $(render_gpu)" ;;
+        *) die "usage: stuttertest kwin show|install|set KEY=VALUE..." ;;
+    esac
+}
+
+# ---------------------------------------------------------------- clocks
+
+APPLIED=()
+P0_PID=
+SMI_PID=
+
+apply_clock() {
+    local item=$1 name val max
+    name=${item%%=*}; val=; [ "$item" != "$name" ] && val=${item#*=}
+    case $name in
+        none) ;;
+        mem)
+            [ -n "$val" ] || val=$(nvidia-smi -i "$SMI_ID" --query-supported-clocks=memory --format=csv,noheader,nounits | tr -dc '0-9\n' | sort -n | tail -1)
+            sudo nvidia-smi -i "$SMI_ID" -lmc "$val,$val" >/dev/null || die "memory lock $val failed"
+            APPLIED+=(mem); echo "memory clock locked at $val MHz" ;;
+        gr)
+            [ -n "$val" ] || val=900
+            max=$(nvidia-smi -i "$SMI_ID" --query-gpu=clocks.max.graphics --format=csv,noheader,nounits | tr -dc '0-9')
+            [ -n "$max" ] || die "cannot read max graphics clock"
+            sudo nvidia-smi -i "$SMI_ID" -lgc "$val,$max" >/dev/null || die "graphics floor $val failed"
+            APPLIED+=(gr); echo "graphics clock floor $val-$max MHz" ;;
+        pm-consistent|pm-max)
+            sudo "$POWERMIZER" --index "$SMI_ID" "${name#pm-}" || die "PowerMizer ${name#pm-} failed"
+            APPLIED+=(pm)
+            "$POWERMIZER" --index "$SMI_ID" 2>/dev/null | grep -q "current: ${name#pm-}" \
+                || echo "warning: PowerMizer mode did not persist after the setting process exited" ;;
+        p0)
+            have glxgears || die "glxgears not installed (mesa-demos / mesa-utils)"
+            "$DGPU_RUN" env __GL_SYNC_TO_VBLANK=0 vblank_mode=0 glxgears -geometry 200x200 >/dev/null 2>&1 &
+            P0_PID=$!
+            APPLIED+=(p0)
+            sleep 3
+            echo "P0 load started (glxgears pid $P0_PID); GPU now: $(nvidia-smi -i "$SMI_ID" --query-gpu=pstate,clocks.mem,clocks.gr --format=csv,noheader)" ;;
+        *) die "unknown clock setting '$item'" ;;
+    esac
+}
+
+reset_clocks() {
+    local a
+    for a in "${APPLIED[@]}"; do
+        case $a in
+            mem) sudo nvidia-smi -i "$SMI_ID" -rmc >/dev/null 2>&1 ;;
+            gr) sudo nvidia-smi -i "$SMI_ID" -rgc >/dev/null 2>&1 ;;
+            pm) sudo "$POWERMIZER" --index "$SMI_ID" adaptive >/dev/null 2>&1 ;;
+            p0) [ -n "$P0_PID" ] && kill "$P0_PID" 2>/dev/null ;;
+        esac
+    done
+    APPLIED=()
+    [ -n "$SMI_PID" ] && kill "$SMI_PID" 2>/dev/null
+    SMI_PID=
+}
+
+cmd_reset() {
+    sudo nvidia-smi -i "$SMI_ID" -rmc >/dev/null 2>&1
+    sudo nvidia-smi -i "$SMI_ID" -rgc >/dev/null 2>&1
+    sudo "$POWERMIZER" --index "$SMI_ID" adaptive >/dev/null 2>&1
+    pkill -f 'glxgears -geometry 200x200' 2>/dev/null
+    echo "clock locks, PowerMizer mode and P0 load reset"
+    [ -e /run/nvidia-clockfloor.state ] && echo "note: the nvidia-clockfloor service is active and will re-apply its own lock"
+    true
+}
+
+# ---------------------------------------------------------------- run
+
+cmd_run() {
+    local name='' clock=none smi='' duration='' force=''
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --clock) clock=${2:?}; shift ;;
+            --smi) smi=1 ;;
+            --duration) duration=${2:?}; shift ;;
+            --force) force=1 ;;
+            -*) die "unknown option $1" ;;
+            *) if [ -z "$name" ]; then name=$1; else die "one NAME only"; fi ;;
+        esac
+        shift
+    done
+    [ -n "$name" ] || die "usage: stuttertest run NAME [--clock LIST] [--smi] [--duration N]"
+    case $name in *[!A-Za-z0-9._-]*) die "NAME may only contain letters, digits, . _ -" ;; esac
+    kwin_pid >/dev/null || die "kwin_wayland is not running (run this inside the Plasma session)"
+    kwin_env | grep -q '^KWIN_LOG_PERFORMANCE_DATA=1' \
+        || die "KWin frame logging is off: stuttertest kwin set perf=on, then log out and back in"
+    if [ -e /run/nvidia-clockfloor.state ] && [ -z "$force" ] && [ "$clock" != none ]; then
+        die "the nvidia-clockfloor service holds a lock ($(cat /run/nvidia-clockfloor.state)); pause it or use --force"
+    fi
+    local c
+    IFS=, read -r -a clocks <<< "$clock"
+    for c in "${clocks[@]}"; do
+        case ${c%%=*} in none|mem|gr|pm-consistent|pm-max|p0) ;; *) die "unknown clock setting '$c'" ;; esac
+        case $c in *=*[!0-9]*) die "clock value must be a number of MHz: '$c'" ;; esac
+    done
+    case ,$clock, in *,mem*|*,gr*|*,pm-*) sudo -v || die "sudo needed for clock settings" ;; esac
+
+    local csvdir; csvdir=$(kwin_csv_dir)
+    mkdir -p "$DATA/runs"
+    local n rd
+    n=$(find "$DATA/runs" -mindepth 1 -maxdepth 1 -type d | wc -l)
+    rd=$(printf '%s/runs/%03d-%s' "$DATA" $((n + 1)) "$name")
+    mkdir -p "$rd"
+
+    local tb gpu
+    tb=$(kwin_env | sed -n 's/^KWIN_DRM_DISABLE_TRIPLE_BUFFERING=//p')
+    case $tb in 0) tb=on ;; 1) tb=off ;; *) tb=default ;; esac
+    gpu=$(render_gpu | cut -c1-40)
+    {
+        echo "name=$name"; echo "date=$(date -Is)"; echo "clock=$clock"; echo "tb=$tb"; echo "render_gpu=$gpu"
+        echo "kwin=$(kwin_wayland --version 2>/dev/null)"; echo "driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"
+        echo "kernel=$(uname -r)"; echo "docked=$(docked && echo yes || echo no)"; echo "ac=$(systemd-ac-power 2>/dev/null && echo yes || echo no)"
+        kwin_env | sed 's/^/env:/'
+    } > "$rd/meta.txt"
+
+    trap 'reset_clocks' EXIT
+    trap 'echo; echo "interrupted"; exit 130' INT TERM
+    for c in "${clocks[@]}"; do apply_clock "$c"; done
+
+    if [ -n "$smi" ]; then
+        nvidia-smi -i "$SMI_ID" --query-gpu=timestamp,pstate,clocks.mem,clocks.gr,power.draw --format=csv,noheader,nounits -lms 500 > "$rd/smi.csv" 2>/dev/null &
+        SMI_PID=$!
+    fi
+
+    local t0 t1
+    t0=$(mono_ns)
+    echo
+    echo ">>> Test '$name' running. Drag windows, move the cursor over the empty desktop, scroll, play a video."
+    if [ -n "$duration" ]; then
+        local i
+        for ((i = duration; i > 0; i--)); do printf '\r    %3ds left ' "$i"; sleep 1; done; echo
+    else
+        read -r -p "    Press Enter when done. " _
+    fi
+    t1=$(mono_ns)
+    reset_clocks
+
+    echo ">>> Keep dragging a window or scrolling for a few seconds while KWin writes its log..."
+    local waited=0 ok
+    while :; do
+        ok=$(python3 - "$t1" "$csvdir" <<'EOF'
+import csv, glob, os, sys
+t1 = int(sys.argv[1])
+files = glob.glob(os.path.join(sys.argv[2], "kwin perf statistics *.csv"))
+best = 0
+for p in files:
+    try:
+        with open(p, newline="") as f:
+            for row in csv.DictReader(f):
+                try:
+                    best = max(best, int(row["target pageflip timestamp"]))
+                except (KeyError, ValueError, TypeError):
+                    pass
+    except OSError:
+        pass
+print("yes" if best >= t1 else "no")
+EOF
+)
+        [ "$ok" = yes ] && break
+        waited=$((waited + 2))
+        if [ $waited -ge 30 ]; then echo "    (log not caught up after 30 s; the last moments may be missing)"; break; fi
+        sleep 2
+    done
+    echo ">>> Done, you can stop."
+
+    local f out
+    for f in "$csvdir"/kwin\ perf\ statistics\ *.csv; do
+        [ -e "$f" ] || continue
+        out="$rd/perf-$(basename "$f" | sed 's/^kwin perf statistics //')"
+        python3 - "$f" "$out" "$t0" "$t1" <<'EOF'
+import csv, sys
+src, dst, t0, t1 = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+with open(src, newline="") as f, open(dst, "w", newline="") as g:
+    r = csv.reader(f)
+    w = csv.writer(g)
+    header = next(r, None)
+    if header:
+        w.writerow(header)
+        for row in r:
+            try:
+                if t0 <= int(row[0]) <= t1:
+                    w.writerow(row)
+            except (ValueError, IndexError):
+                pass
+EOF
+    done
+
+    local rating
+    read -r -p ">>> How smooth did it feel? 1 (bad) .. 5 (perfect), Enter to skip: " rating
+    case $rating in [1-5]) ;; *) rating=- ;; esac
+    echo "rating=$rating" >> "$rd/meta.txt"
+
+    local pstates=-
+    if [ -s "$rd/smi.csv" ]; then
+        pstates=$(python3 - "$rd/smi.csv" <<'EOF'
+import collections, sys
+ps = collections.Counter(); mem = []
+for line in open(sys.argv[1]):
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) >= 3:
+        ps[parts[1]] += 1
+        mem.append(parts[2])
+total = sum(ps.values()) or 1
+changes = sum(1 for a, b in zip(mem, mem[1:]) if a != b)
+print(" ".join(f"{k}:{100 * v // total}%" for k, v in sorted(ps.items())) + f" memchg:{changes}")
+EOF
+)
+    fi
+
+    [ -e "$DATA/results.tsv" ] || printf 'run\tname\tclock\ttb\trender_gpu\toutput\tframes\tlate\tlate%%\tmissed\trender_p95%%\trender_max%%\trating\tpstates\n' > "$DATA/results.tsv"
+    echo
+    echo "=== $(basename "$rd")  clock=$clock  tb=$tb  gpu=$gpu  rating=$rating"
+    local any='' line
+    for f in "$rd"/perf-*.csv; do
+        [ -e "$f" ] || continue
+        any=1
+        "$SUMMARY" "$f"
+        line=$("$SUMMARY" --tsv "$f")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(basename "$rd" | cut -d- -f1)" "$name" "$clock" "$tb" "$gpu" "$line" "$rating" "$pstates" >> "$DATA/results.tsv"
+    done
+    [ -n "$any" ] || echo "no KWin frame log found in $csvdir"
+    [ "$pstates" != - ] && echo "nvidia-smi: $pstates"
+    echo "saved: $rd"
+}
+
+cmd_report() {
+    [ -e "$DATA/results.tsv" ] || die "no runs yet"
+    if have column; then column -t -s $'\t' "$DATA/results.tsv"; else cat "$DATA/results.tsv"; fi
+}
+
+case ${1:-} in
+    info) cmd_info ;;
+    kwin) shift; cmd_kwin "$@" ;;
+    run) shift; cmd_run "$@" ;;
+    report) cmd_report ;;
+    reset) cmd_reset ;;
+    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

@@ -1,0 +1,9 @@
+[Unit]
+Description=NVIDIA clock lock while docked on external power
+After=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nvidia-clockfloor
+TimeoutStartSec=120
+SyslogIdentifier=nvidia-clockfloor

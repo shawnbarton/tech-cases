@@ -1,0 +1,142 @@
+#!/bin/bash
+# Lock the NVIDIA GPU's clocks (memory clock lock and/or graphics clock floor),
+# or set a PowerMizer mode, only while the laptop is on external power AND an
+# external display on the NVIDIA GPU is connected. Released on battery or
+# undock so the dGPU can power down again.
+#
+# Started by nvidia-clockfloor.service, which udev (power, display and dock
+# changes), a 2-minute timer and a resume hook trigger. It only reads sysfs
+# unless the state has to change, so it never wakes a sleeping dGPU on its own.
+set -u
+
+ENABLED=1
+METHOD=locks          # locks | powermizer
+GPU_PCI=0000:01:00.0  # PCI address of the NVIDIA GPU
+SMI_ID=0              # nvidia-smi / NVML index of the same GPU
+MEM_LOCK=6001         # MHz, locks min=max (a cap too); empty = no memory lock
+GR_MIN=               # MHz graphics floor (upper bound = GPU max); empty = no floor
+PM_MODE=consistent    # METHOD=powermizer: consistent | max
+NV_POWERMIZER=/usr/local/sbin/nv-powermizer
+NVSMI=nvidia-smi
+SETTLE=3              # seconds to let hotplug settle before deciding
+SYSFS=/sys
+RUNDIR=/run
+
+CONF=${NVIDIA_CLOCKFLOOR_CONF:-/etc/default/nvidia-clockfloor}
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+STATE=$RUNDIR/nvidia-clockfloor.state   # settings currently applied, if any
+STALE=$RUNDIR/nvidia-clockfloor.stale   # created after resume: re-apply
+LOCKF=$RUNDIR/nvidia-clockfloor.lock
+
+smi() { timeout 30 "$NVSMI" -i "$SMI_ID" "$@"; }
+pm() { timeout 30 "$NV_POWERMIZER" --index "$SMI_ID" "$@"; }
+
+apply() {
+    if [ "$METHOD" = powermizer ]; then
+        pm "$PM_MODE" >/dev/null || { echo "PowerMizer $PM_MODE failed"; return 1; }
+        echo "applied: PowerMizer $PM_MODE"
+    else
+        local mem=none gr=none max
+        if [ -n "$MEM_LOCK" ]; then
+            smi -lmc "$MEM_LOCK,$MEM_LOCK" >/dev/null || { echo "memory clock lock $MEM_LOCK failed"; return 1; }
+            mem="$MEM_LOCK MHz"
+        fi
+        if [ -n "$GR_MIN" ]; then
+            max=$(smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits | tr -dc '0-9')
+            if [ -z "$max" ] || [ "$max" -le "$GR_MIN" ]; then
+                gr="skipped (max graphics clock '${max:-N/A}')"
+            elif smi -lgc "$GR_MIN,$max" >/dev/null; then
+                gr="$GR_MIN-$max MHz"
+            elif [ -z "$MEM_LOCK" ]; then
+                echo "graphics clock floor $GR_MIN failed"; return 1
+            else
+                gr=FAILED
+            fi
+        fi
+        echo "applied: memory lock $mem, graphics floor $gr"
+    fi
+    echo "$sig" > "$STATE"
+}
+
+release() {
+    local ok=1
+    case $1 in
+        powermizer) pm adaptive >/dev/null || ok= ;;
+        *) smi -rmc >/dev/null 2>&1 || ok=; smi -rgc >/dev/null 2>&1 || ok= ;;
+    esac
+    if [ -n "$ok" ]; then
+        rm -f "$STATE"
+        echo "released ($1)"
+    else
+        echo "release ($1) failed, will retry"
+        return 1
+    fi
+}
+
+# Same answer as the check the plan uses; reads sysfs only.
+on_ac() {
+    if [ "$SYSFS" = /sys ] && command -v systemd-ac-power >/dev/null; then
+        systemd-ac-power
+        return
+    fi
+    local s o
+    for s in "$SYSFS"/class/power_supply/*; do
+        [ -r "$s/type" ] || continue
+        [ "$(cat "$s/type")" = Battery ] && continue
+        o=$(cat "$s/online" 2>/dev/null)
+        [ -n "$o" ] && [ "$o" -gt 0 ] 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# Cached connector status; reading it does not probe or wake the GPU.
+docked() {
+    local c
+    for c in "$SYSFS"/bus/pci/devices/"$GPU_PCI"/drm/card*/card*-*; do
+        [ -r "$c/status" ] || continue
+        case ${c##*/} in *-eDP-*|*-LVDS-*|*-DSI-*) continue ;; esac
+        [ "$(cat "$c/status")" = connected ] && return 0
+    done
+    return 1
+}
+
+bad=
+case $METHOD in locks|powermizer) ;; *) bad="METHOD=$METHOD" ;; esac
+case $MEM_LOCK in *[!0-9]*) bad="MEM_LOCK=$MEM_LOCK" ;; esac
+case $GR_MIN in *[!0-9]*) bad="GR_MIN=$GR_MIN" ;; esac
+case $PM_MODE in consistent|max) ;; *) bad="PM_MODE=$PM_MODE" ;; esac
+if [ "$METHOD" = locks ] && [ -z "$MEM_LOCK$GR_MIN" ]; then bad="METHOD=locks needs MEM_LOCK or GR_MIN"; fi
+
+exec 9>"$LOCKF"
+flock -w 60 9 || exit 0
+sleep "$SETTLE"
+
+have_sig=$(cat "$STATE" 2>/dev/null)
+have=${have_sig%%:*}
+
+if [ -n "$bad" ]; then
+    echo "invalid setting $bad in $CONF"
+    [ -n "$have" ] && release "$have"
+    exit 1
+fi
+
+if [ "$METHOD" = powermizer ]; then sig="powermizer:$PM_MODE"; else sig="locks:$MEM_LOCK:$GR_MIN"; fi
+
+want=
+if [ "$ENABLED" = 1 ] && on_ac && docked; then want=1; fi
+stale=
+if [ -e "$STALE" ]; then stale=1; rm -f "$STALE"; fi
+
+if [ -n "$want" ]; then
+    if [ "$have_sig" != "$sig" ]; then
+        if [ -n "$have" ]; then release "$have" || exit 1; fi
+        apply || exit 1
+    elif [ -n "$stale" ]; then
+        apply || { touch "$STALE"; exit 1; }
+    fi
+elif [ -n "$have" ]; then
+    release "$have" || exit 1
+fi
+exit 0

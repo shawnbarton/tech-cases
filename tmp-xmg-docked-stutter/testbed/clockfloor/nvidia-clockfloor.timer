@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-check NVIDIA clock floor conditions (catches missed events)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
