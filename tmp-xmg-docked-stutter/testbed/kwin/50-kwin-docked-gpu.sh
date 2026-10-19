@@ -29,8 +29,8 @@ KD_TRIPLE_BUFFERING=
 # Raising it (e.g. 3000) gives slow commits more time. Empty = KWin default.
 KD_SAFETY_MARGIN=
 
-# 1 = write per-output frame timing CSVs ("kwin perf statistics <output>.csv")
-# to the home directory for kwin-perf-summary. KWin overwrites them at each login.
+# 1 = while docked, write per-output frame timing CSVs ("kwin perf statistics
+# <output>.csv") to the home directory. KWin overwrites them at each login.
 KD_PERF_LOG=
 
 # Plasma copies the session environment into the systemd user manager, so a value
@@ -85,7 +85,7 @@ case $KD_SAFETY_MARGIN in
     *) if [ -n "$kd_docked" ]; then export KWIN_DRM_OVERRIDE_SAFETY_MARGIN="$KD_SAFETY_MARGIN"; fi ;;
 esac
 
-if [ "$KD_PERF_LOG" = 1 ]; then
+if [ "$KD_PERF_LOG" = 1 ] && [ -n "$kd_docked" ]; then
     export KWIN_LOG_PERFORMANCE_DATA=1
 fi
 

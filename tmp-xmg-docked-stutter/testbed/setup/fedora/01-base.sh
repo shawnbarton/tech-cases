@@ -21,7 +21,7 @@ fi
 
 log "Installing diagnostic tools"
 TOOLS=(glx-utils mesa-demos vulkan-tools igt-gpu-tools libva-utils drm_info edid-decode
-       python3 pciutils lm_sensors bolt switcheroo-control mokutil git)
+       python3 pciutils lm_sensors bolt switcheroo-control mokutil git dbus-tools mpv xlsclients)
 srun dnf install -y --skip-unavailable "${TOOLS[@]}"
 # Full-feature Intel media driver from RPM Fusion nonfree: Fedora's own build has no AV1 decode on Raptor Lake.
 srun dnf install -y intel-media-driver

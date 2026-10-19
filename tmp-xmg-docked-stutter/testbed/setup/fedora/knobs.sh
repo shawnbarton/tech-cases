@@ -18,10 +18,9 @@ case ${1:-}:${2:-} in
     vblank:on)
         modinfo -F parm nvidia_drm 2>/dev/null | grep -q '^vblank:' || warn "this driver's nvidia_drm has no 'vblank' parameter (needs 610.43.02+)"
         write_root_file "$VBLANK" <<< "options nvidia_drm vblank=1"
-        srun dracut -f
         echo "reboot to apply" ;;
     vblank:off)
-        srun rm -f "$VBLANK"; srun dracut -f; echo "reboot to apply" ;;
+        srun rm -f "$VBLANK"; echo "reboot to apply" ;;
     powerd:on) srun systemctl enable --now nvidia-powerd.service ;;
     powerd:off) srun systemctl disable --now nvidia-powerd.service ;;
     *) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

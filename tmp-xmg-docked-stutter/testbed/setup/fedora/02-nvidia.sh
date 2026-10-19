@@ -55,7 +55,12 @@ kernels() {
 check_secure_boot() {
     command -v mokutil >/dev/null || return 0
     mokutil --sb-state 2>/dev/null | grep -qi enabled || return 0
-    if [ -e "$AKMODS_KEY" ] && mokutil --test-key "$AKMODS_KEY" 2>/dev/null | grep -qi 'already enrolled'; then
+    # The key directory is root:akmods 0750, so the checks need sudo.
+    if [ -n "$DRYRUN" ]; then
+        echo "[dry-run] Secure Boot is on: would check that $AKMODS_KEY is enrolled"
+        return 0
+    fi
+    if sudo test -r "$AKMODS_KEY" && sudo mokutil --test-key "$AKMODS_KEY" 2>/dev/null | grep -qi 'already enrolled'; then
         return 0
     fi
     cat <<EOT
@@ -71,7 +76,7 @@ BIOS (simplest for a test bed), or enroll the key once:
 
 Then run this script again.
 EOT
-    [ -n "$DRYRUN" ] || exit 1
+    exit 1
 }
 
 mode=${1:-}
@@ -84,9 +89,15 @@ esac
 require_fedora
 check_secure_boot
 
+# The two branches ship the same library paths without full Conflicts, so the
+# old branch is removed explicitly in the same transaction.
 case $mode in
-    legacy-*) PKGS=(akmod-nvidia-580xx xorg-x11-drv-nvidia-580xx-cuda xorg-x11-drv-nvidia-580xx-cuda-libs); branch=580xx ;;
-    *) PKGS=(akmod-nvidia xorg-x11-drv-nvidia-cuda xorg-x11-drv-nvidia-cuda-libs); branch=current ;;
+    legacy-*) branch=580xx; kmod=nvidia-580xx
+              PKGS=(akmod-nvidia-580xx xorg-x11-drv-nvidia-580xx-cuda xorg-x11-drv-nvidia-580xx-cuda-libs)
+              OLD=(akmod-nvidia 'kmod-nvidia-[0-9]*' xorg-x11-drv-nvidia 'xorg-x11-drv-nvidia-[a-z]*' nvidia-settings) ;;
+    *) branch=current; kmod=nvidia
+       PKGS=(akmod-nvidia xorg-x11-drv-nvidia-cuda xorg-x11-drv-nvidia-cuda-libs)
+       OLD=(akmod-nvidia-580xx 'kmod-nvidia-580xx-*' 'xorg-x11-drv-nvidia-580xx*' nvidia-settings-580xx) ;;
 esac
 case $mode in
     *open) kind=open; macro='%_with_kmod_nvidia_open 1'; want_license=open ;;
@@ -95,6 +106,15 @@ esac
 gsp_off=; case $mode in *-gsp-off) gsp_off=1 ;; esac
 
 log "Driver: $branch branch, $kind kernel modules, GSP ${gsp_off:+off}${gsp_off:-on}"
+
+# Keep the old settings so a failed package transaction can put them back.
+old_macro=$(cat "$MACROS" 2>/dev/null || true)
+old_gsp=$(cat "$GSPCONF" 2>/dev/null || true)
+restore_settings() {
+    if [ -n "$old_macro" ]; then write_root_file "$MACROS" <<< "$old_macro"; else srun rm -f "$MACROS"; fi
+    if [ -n "$old_gsp" ]; then write_root_file "$GSPCONF" <<< "$old_gsp"; else srun rm -f "$GSPCONF"; fi
+}
+powerd_was=$(systemctl is-enabled nvidia-powerd.service 2>/dev/null || true)
 
 log "Kernel module type for akmods ($MACROS)"
 write_root_file "$MACROS" <<< "$macro"
@@ -107,17 +127,35 @@ else
 fi
 
 log "Installing packages (switching branch if needed)"
-srun dnf install -y --allowerasing "${PKGS[@]}"
+"$HERE/freeze.sh" unlock-nvidia
+if ! srun dnf "do" -y --allowerasing --action=remove "${OLD[@]}" --action=install "${PKGS[@]}"; then
+    restore_settings
+    die "package transaction failed; previous driver settings restored"
+fi
+"$HERE/freeze.sh" relock-nvidia
+
+# Removing the other branch's -power package disables these units (its %preun
+# runs after the new package's %post), so put them back as they were.
+for u in nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service nvidia-suspend-then-hibernate.service; do
+    if [ -n "$DRYRUN" ] || systemctl cat "$u" >/dev/null 2>&1; then srun systemctl enable "$u"; fi
+done
+case $powerd_was in
+    enabled) srun systemctl enable --now nvidia-powerd.service ;;
+    disabled) srun systemctl disable --now nvidia-powerd.service ;;
+esac
 
 log "Building the kernel module"
 for k in $(kernels); do
-    srun akmods --force --rebuild --kernels "$k"
-    srun dracut -f --kver "$k"
+    # --rebuild only when a kmod is already installed for this kernel: akmods
+    # installs a rebuild with "dnf reinstall", which does nothing otherwise.
+    rb=()
+    if rpm -q "kmod-$kmod-$k" >/dev/null 2>&1 || [ -d "${SETUP_MODULES:-/lib/modules}/$k/extra/$kmod" ]; then rb=(--rebuild); fi
+    srun akmods --force "${rb[@]}" --akmod "$kmod" --kernels "$k"
     if [ -z "$DRYRUN" ]; then
         ver=$(modinfo -k "$k" -F version nvidia 2>/dev/null || true)
         lic=$(modinfo -k "$k" -F license nvidia 2>/dev/null || true)
         got=open; [ "$lic" = NVIDIA ] && got=proprietary
-        [ -n "$ver" ] || die "no nvidia module was built for $k (see: journalctl -u akmods, /var/cache/akmods/nvidia/*.log)"
+        [ -n "$ver" ] || die "no nvidia module was built for $k (see the akmods output above and /var/cache/akmods/$kmod/*.log)"
         [ "$got" = "$want_license" ] || die "built $got modules for $k, expected $want_license (check $MACROS)"
         echo "$k: nvidia $ver ($got)"
     fi

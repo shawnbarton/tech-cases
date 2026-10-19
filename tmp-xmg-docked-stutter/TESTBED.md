@@ -1,6 +1,6 @@
 # Test bed: Fedora KDE 44 on the XMG Fusion 15 (E24)
 
-*2026-10-19. A fresh install used only to find what removes the docked stutter. Scripts live in `testbed/`; every one supports `DRYRUN=1` to preview its commands first.*
+*2026-10-19. A fresh install used only to find what removes the docked stutter. Scripts live in `testbed/`. The setup scripts (`setup/fedora/*.sh`, `setup/install-testbed.sh`) support `DRYRUN=1` to preview their commands.*
 
 ## 1. Why Fedora KDE Plasma 44
 
@@ -13,7 +13,7 @@
 | Full Intel media driver (AV1 on Raptor Lake) | RPM Fusion `intel-media-driver` |
 
 Why not the alternatives:
-- **Plasma 6.8:** not yet. 6.8.0 has an open regression, KDE 527251: flicker on DP/USB-C outputs with Intel plus NVIDIA, which is exactly this laptop. Fedora gets 6.8 a little after Fedora 45 ships (late October); stay on 6.7.5 for the main campaign.
+- **Plasma 6.8:** not yet. 6.8.0 has an open regression, KDE 527251: flicker on DP/USB-C outputs with Intel plus NVIDIA, which is exactly this laptop. Fedora gets 6.8 shortly after Fedora 45 ships (late October), so freeze the stack for the campaign (§3, step 6).
 - **CachyOS / Arch:** they ship Plasma 6.8.0 and the open modules only, and CachyOS changes scheduler and NVIDIA defaults, which muddies results.
 - **Kubuntu 26.10:** has driver 595 as both module types, but will never get Plasma 6.8 and has no COSMIC.
 - **TUXEDO tools:** `tuxedo-drivers` and Control Center refuse to load on XMG Raptor Lake hardware. Leave fans and keyboard to the firmware.
@@ -25,14 +25,14 @@ Your `edid_setup` 8 bpc installer targets initramfs-tools with GRUB or kernelstu
 - **BIOS:**
   - Graphics mode **Hybrid** for the main runs; dGPU-only comes later in Phase C.
   - **Secure Boot off** is simplest for a test bed, because switching driver module types rebuilds them. If you keep it on, `02-nvidia.sh` walks you through the one-time key enrollment.
-- **Get this folder onto the laptop:** clone `shawnbarton/tech-cases`, branch `claude/cosmic-comp-1915-fix-keo2dc`, once the push from this session works. Otherwise use the patch or archive sent in chat. In the repo or archive, the scripts are under `tmp-xmg-docked-stutter/`.
+- **Get this folder onto the laptop:** `git clone -b claude/cosmic-comp-1915-fix-keo2dc https://github.com/shawnbarton/tech-cases`. Everything is under `tech-cases/tmp-xmg-docked-stutter/`.
 
 ## 3. Install and set up
 
 1. Install **Fedora KDE Plasma Desktop 44** with the default (btrfs) layout. Create your user and connect to the network. Undocked is fine for this part.
 2. Base system, RPM Fusion, tools, and the Alt+SysRq emergency keys:
    ```
-   cd tmp-xmg-docked-stutter/testbed/setup/fedora
+   cd tech-cases/tmp-xmg-docked-stutter/testbed/setup/fedora
    ./01-base.sh
    reboot
    ```
@@ -42,103 +42,143 @@ Your `edid_setup` 8 bpc installer targets initramfs-tools with GRUB or kernelstu
    reboot
    ./02-nvidia.sh status        # expect 615.78.08 (open), GSP firmware version shown
    ```
-4. **Dock** (if the dock asks for authorization: `boltctl list`, then `boltctl enroll --policy auto <uuid>`). Turn both Dells on. Close the lid, or disable the built-in display while docked with the lid open. Then, inside the Plasma session:
+4. **Dock.** If the dock asks for authorization: `boltctl list`, then `boltctl enroll --policy auto <uuid>`. Turn both Dells on. **Pick one lid state for the whole campaign:** lid closed, or lid open with the built-in display disabled in Display settings. Then, inside the Plasma session:
    ```
-   ../install-testbed.sh        # tools into ~/.local/bin, KWin login script, frame log on,
-                                # Adaptive Sync Never on the Dells, power profile fixed
+   ../install-testbed.sh        # tools into ~/.local/bin, KWin login script with frame log,
+                                # Adaptive Sync Never on the Dells, fixed power profile,
+                                # no automatic screen-off / sleep / lock on AC
+   stuttertest kwin set lidcheck=off      # only if you work lid-open with the built-in display disabled
    ```
 5. Log out and back in (docked), then `stuttertest info`. Check:
    - the KWin version (6.7.x) and the render GPU (Intel in hybrid mode);
-   - "KWIN_LOG_PERFORMANCE_DATA=1" under the running KWin;
+   - `KWIN_LOG_PERFORMANCE_DATA=1` under the running KWin, and "frame logs open" lists one file per Dell;
    - no GPU pollers listed.
+6. **Freeze the stack** so no update changes KWin, the kernel, Mesa or the driver mid-campaign:
+   ```
+   ./freeze.sh on               # ./freeze.sh off when the campaign is over
+   ```
+   Don't apply Discover updates during the campaign. Driver changes only go through `02-nvidia.sh`, which handles the lock itself.
 
 Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps KDE's login screen.
 
 ## 4. How a test works
 
-- `stuttertest run NAME [--clock …] [--duration 90]` measures one test while you use the desktop, then shows late frames per monitor and asks how smooth it felt (1–5).
+- `stuttertest run NAME [--clock …] --duration 90` measures one test while you use the desktop. It then shows, per monitor, the late frames, missed refreshes and the share of frames KWin triple-buffered. It asks whether you saw stutter and whether you saw static/corruption (yes/no), plus an optional one-line note. The terminal beeps when the time is up.
+- The late-frame count is the measurement. It also says *how much* stutter there was when the answer is yes. Your yes/no is the cross-check that the numbers match what you see. Corruption is the separate dock-port bug, recorded per run for free in case it follows a driver or setting.
 - `stuttertest report` compares all runs. The results are in `~/stuttertest/`.
-- **Use the same routine every time** (90 s):
-  1. 20 s: cursor circles over the empty desktop.
-  2. 20 s: drag a window across both Dells.
-  3. 20 s: scroll a long web page.
-  4. 30 s: a 4K YouTube video, windowed.
-- Settings that need a new login: `stuttertest kwin set …`, then log out and back in. The KWin settings are:
-  - `tb=default|on|off` (triple buffering)
-  - `gpu=default|nvidia` (who composites)
-  - `margin=<µs>|default` (safety margin)
-- Clock settings apply only during a run and are reset afterwards:
-  - `mem[=MHz]`: memory clock lock
-  - `gr[=MHz]`: graphics clock floor
-  - `pm-max`, `pm-consistent`: PowerMizer modes
-  - `p0`: a tiny load that holds the GPU at full power, NVIDIA's own diagnostic
+- **The routine** is normal use of the applications where you see the stutter, on the Dells. Phase 0 (§5) pins down which ones. Once chosen, keep it the same for every run (90 s):
+  1. 30 s: the app that showed it most: scroll, switch views, type.
+  2. 30 s: a second app, the other kind if both kinds showed it (X11 vs native Wayland).
+  3. 20 s: cursor over the empty desktop. On COSMIC that was where it showed.
+  4. 10 s: drag a window from one Dell to the other.
 
-  Combine them with commas.
+  `xlsclients` lists which running apps are X11 (through Xwayland). Electron apps such as Discord usually are. Fedora's Firefox is native Wayland.
+- **Settings that need a new login** (`stuttertest kwin set …`, then log out and back in):
+  - `tb=default|on|off`: triple buffering
+  - `gpu=default|nvidia`: who composites
+  - `margin=<µs>|default`: the safety margin before each refresh
+  - `lidcheck=on|off` and `perf=on|off`
+- **Clock settings apply only during the run** and are reset afterwards:
+  - `mem[=MHz]`: memory clock lock (default: the highest supported)
+  - `gr[=MHz]`: graphics clock floor (default 900)
+  - `pm-max`, `pm-consistent`: PowerMizer modes
+  - `p0`: a small uncapped load on the NVIDIA GPU, which holds it at full power (NVIDIA's own diagnostic)
+  - `p0ctl`: the same load on the Intel GPU, as a control
+
+  Combine them with commas. The values applied are recorded with the run.
 - **Rules:**
-  - On AC power and docked.
-  - No suspend, VT switch or dock re-plug in the middle of a session: KWin restarts its frame log.
+  - On AC power and docked. No suspend, VT switch, dock re-plug or monitor power-off in the middle of a session: KWin restarts its frame log, and on driver 615 a monitor power-cycle can hang KWin (§6).
   - GPU pollers closed: system-monitor GPU widgets, nvtop, mangohud.
-  - `--smi` logs P-states, but adds GPU polling. Use it for a second run of an interesting test, not for the main one.
+  - **Compare clock tests with a baseline from the same login** (a run without `--clock` just before them). Settings that need a new login are compared across logins by nature, so keep everything else identical.
+  - `--smi` logs P-states, but adds GPU polling. Use it on a second run of an interesting test.
+  - Names start with the phase letter; repeats get a suffix (`a1`, `a1-2`, `f-a1-powerd-off`).
 
 ## 5. Test campaign
 
-Run phases in order. Two runs per test cut down noise (`a1-default`, `a1-default-2`).
+**Phase 0: find the trigger** (default setup, one login). Use *only* the named kind of activity for each 60 s run:
+```
+stuttertest run 0-x11 --duration 60          # only X11 apps (e.g. Discord)
+stuttertest run 0-wayland --duration 60      # only native Wayland apps (e.g. Firefox, Dolphin, System Settings)
+stuttertest run 0-desktop --duration 60      # no apps in focus: cursor over the empty desktop, panel, window drags
+```
+Whichever runs show the stutter (your yes/no answer plus late frames) define the routine for the rest of the campaign. If only one kind of app shows it, that's a finding in itself: it points at how that kind of app reaches the screen rather than at the desktop as a whole.
 
 **Phase A: hybrid mode, Intel composites, driver 615 open (the default setup)**
 ```
-stuttertest run a1-default --duration 90                 # KWin 6.7.5: triple buffering on
-stuttertest kwin set tb=off        # log out/in
-stuttertest run a2-tb-off --duration 90
-stuttertest kwin set tb=default    # log out/in
+stuttertest run a1 --duration 90                       # baseline: KWin 6.7.5, triple buffering on
 stuttertest run a3-mem --clock mem --duration 90
 stuttertest run a3-gr --clock gr --duration 90
 stuttertest run a3-pm-max --clock pm-max --duration 90
 stuttertest run a3-pm-consistent --clock pm-consistent --duration 90
 stuttertest run a3-p0 --clock p0 --duration 90
-stuttertest kwin set margin=3000   # log out/in
+stuttertest run a3-p0ctl --clock p0ctl --duration 90
+stuttertest run a1-2 --duration 90                     # baseline again: did anything drift?
+
+stuttertest kwin set tb=off                            # log out/in
+stuttertest run a2-tb-off --duration 90
+
+stuttertest kwin set tb=default margin=3000            # log out/in
 stuttertest run a4-margin3000 --duration 90
-stuttertest kwin set margin=default
+stuttertest kwin set margin=default                    # log out/in before Phase B
 ```
 
-**Phase B: hybrid mode, NVIDIA composites** (`stuttertest kwin set gpu=nvidia`, lid closed, log out/in; `stuttertest info` must show an NVIDIA render GPU)
+**Phase B: hybrid mode, NVIDIA composites.** Set `stuttertest kwin set gpu=nvidia`, keep the same lid state (lid closed, or `lidcheck=off` as above), log out and in. `stuttertest info` must show an NVIDIA render GPU.
 ```
-stuttertest run b1-default --duration 90
+stuttertest run b1 --duration 90
 stuttertest run b3-p0 --clock p0 --duration 90
+stuttertest run b3-p0ctl --clock p0ctl --duration 90
 stuttertest run b3-mem --clock mem --duration 90
+stuttertest kwin set gpu=default       # log out/in
 ```
-Then go back with `stuttertest kwin set gpu=default`. If X11 apps flicker in this mode, note it; it doesn't affect the frame numbers.
+If X11 apps flicker in this mode, note it; it doesn't affect the frame numbers.
 
-**Phase C: BIOS dGPU-only.** Repeat `c1-default`, `c2-tb-off` and `c3-p0` (the render GPU is NVIDIA automatically).
-
-**Phase D: GSP off (same driver, proprietary modules).** Repeat the best and worst tests from Phases A–C, then switch back with `./02-nvidia.sh open`:
+**Phase C: BIOS dGPU-only.** The render GPU is NVIDIA automatically, and `p0ctl` is unavailable (no Intel GPU).
 ```
-./02-nvidia.sh closed-gsp-off && reboot
-./02-nvidia.sh status       # GSP Firmware Version: N/A
+stuttertest run c1 --duration 90
+stuttertest run c3-p0 --clock p0 --duration 90
+stuttertest kwin set tb=off            # log out/in
+stuttertest run c2-tb-off --duration 90
+stuttertest kwin set tb=default
 ```
+Then switch the BIOS back to **Hybrid**.
 
-**Phase E: NVIDIA vblank timestamps** (`./knobs.sh vblank on`, reboot). Repeat `a1`/`b1`, then `./knobs.sh vblank off`.
+**Phase D: module type, then GSP.** Repeat `a1`, `a3-p0` and `b1` (with the Phase B setting) in each step:
+```
+./02-nvidia.sh closed && reboot           # proprietary modules, GSP on   -> runs d1-a1, d1-a3-p0, d1-b1
+./02-nvidia.sh closed-gsp-off && reboot   # proprietary modules, GSP off  -> runs d2-a1, d2-a3-p0, d2-b1
+./02-nvidia.sh open && reboot             # back to the default
+```
+`./02-nvidia.sh status` after each reboot: "GSP Firmware Version" must read N/A in the GSP-off step.
 
-**Phase F: Dynamic Boost off** (`./knobs.sh powerd off`). Repeat `a1`, then `./knobs.sh powerd on`. Otherwise keep it in the same state for every run.
+**Phase E: NVIDIA vblank timestamps.** `./knobs.sh vblank on`, reboot, repeat `a1` and `b1` as `e-a1` and `e-b1`, then `./knobs.sh vblank off`.
 
-**Phase G: older driver branch** (`./02-nvidia.sh legacy-open`, reboot). Repeat `a1`, `a3-p0` and `b1`. Use this immediately instead if 615 hangs after a monitor power-cycles (see §6).
+**Phase F: Dynamic Boost off.** `./knobs.sh powerd off`, repeat `a1` as `f-a1`, then `./knobs.sh powerd on`. Otherwise keep it in the same state for every run.
 
-**Phase H, optional: other desktops.** Run the same routine in GNOME and COSMIC sessions with `stuttertest run h-gnome --smi` (no KWin frame log there: judge by feel plus P-states).
+**Phase G: older driver branch.** `./02-nvidia.sh legacy-open`, reboot, repeat `a1`, `a3-p0` and `b1` as `g-…`. Switch back with `./02-nvidia.sh open`. Use this branch for the rest of the campaign if 615 hangs after a monitor power-cycle (§6).
+
+**Phase H, optional: other desktops.** Log into GNOME or COSMIC, dock, and run `stuttertest run h-gnome --smi --duration 90` with the same routine. There's no KWin frame log there, so it records your yes/no answers plus P-states.
+
+**Phase V, optional: video playback (the separate I8 problem).** Only if video matters to you. Play the same local 4K file windowed (`mpv --loop --geometry=50%x50% <file>`) in Phase A and Phase B setups, as `v-a` and `v-b`. Phase B removes the Intel→NVIDIA copy for video too.
 
 **How to read the results:**
-- **`tb=off` clearly worse than default:** triple buffering matters. Plasma ≥ 6.7.3 is the fix, and your old TUXEDO install (6.6.x) lacked it.
-- **`p0` fixes it, locks don't:** it's NVIDIA's low-power latency (NV 4830125). That is evidence for [open-gpu-kernel-modules #650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650), and the workaround is a held clock or load while docked.
-- **A lock or PowerMizer mode fixes it:** make it automatic with `testbed/clockfloor/install.sh`, which applies only while docked on AC.
-- **GSP off fixes it:** a firmware-path issue. Report it to NVIDIA with that A/B.
+- **`a2-tb-off` clearly worse than `a1`:** triple buffering matters. Plasma ≥ 6.7.3 is the fix; your old TUXEDO install (6.6.x) lacked it. If the triple-buffered share stays near 0% in `a1`, triple buffering never engaged and this comparison tells you nothing.
+- **`p0` fixes it and `p0ctl` doesn't:** it's NVIDIA's low-power latency (NV 4830125). That is evidence for [open-gpu-kernel-modules #650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650), and the workaround is a held clock or load while docked.
+- **A lock or PowerMizer mode fixes it:** make it automatic with `testbed/clockfloor/install.sh`. Set `/etc/default/nvidia-clockfloor` to what the winning run used (`MEM_LOCK=<value>`, `GR_MIN=900`, or `METHOD=powermizer PM_MODE=max|consistent`), then `sudo systemctl start nvidia-clockfloor.service`. It only applies while docked on AC.
+- **`d2` (GSP off) fixes it and `d1` (proprietary, GSP on) doesn't:** a firmware-path issue. If `d1` alone fixes it, it's the module flavour.
 - **NVIDIA compositing (B) beats Intel (A) in hybrid mode:** keep `gpu=nvidia` for docked use.
 
 ## 6. Known risks and recovery
 
-- **Driver 615 and dock power-cycles:** after a DisplayPort monitor power-cycles behind a dock or hub, KWin can hang waiting on the GPU firmware ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392); one report is an RTX 4070 laptop in hybrid mode). Avoid turning the Dells off and on during a session. If it hits:
+- **Driver 615 and monitor power-cycles:** after a DisplayPort monitor power-cycles behind a dock or hub, KWin can hang waiting on the GPU firmware ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392); one report is an RTX 4070 laptop in hybrid mode). That includes automatic screen-off, which `install-testbed.sh` turns off on AC. If it hits:
   1. Press Alt+SysRq + S, U, B, a few seconds apart. `01-base.sh` enables exactly these three; holding the power button also works.
   2. Then consider Phase G's 580 branch for the rest of the campaign.
 - **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default`.
-- **A driver switch fails to build:** `./02-nvidia.sh status`, `journalctl -u akmods`, `/var/cache/akmods/nvidia/*.log`. `./02-nvidia.sh open` returns to the default.
-- **Microcode:** `stuttertest info` prints it. The newest for this CPU (06-b7-01) is 0x137. Update the XMG BIOS if it's lower.
+- **A driver switch fails:**
+  - `./02-nvidia.sh` restores the previous build settings when the package transaction fails.
+  - `./02-nvidia.sh status`, the akmods output, and `/var/cache/akmods/<nvidia or nvidia-580xx>/*.log` show why.
+  - `./02-nvidia.sh open` returns to the default.
+  - If the version lock gets in the way, run `./freeze.sh off`, then switch.
+- **Microcode:** `stuttertest info` prints it. The newest for this CPU (06-b7-01) is 0x137; update the XMG BIOS if it's lower.
 
 ## 7. What to send back
 

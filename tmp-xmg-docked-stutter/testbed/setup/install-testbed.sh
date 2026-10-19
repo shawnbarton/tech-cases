@@ -45,10 +45,31 @@ else
 fi
 
 log "Power profile: balanced, kept fixed for the whole test campaign"
-if command -v powerprofilesctl >/dev/null; then
-    run powerprofilesctl set balanced || true
-    echo "current: $(powerprofilesctl get 2>/dev/null || echo '?')"
+# Works with both power-profiles-daemon and Fedora's tuned-ppd (same D-Bus API).
+PPD=(net.hadess.PowerProfiles /net/hadess/PowerProfiles net.hadess.PowerProfiles ActiveProfile)
+if run busctl --system set-property "${PPD[@]}" s balanced 2>/dev/null; then
+    echo "current: $(busctl --system get-property "${PPD[@]}" 2>/dev/null | cut -d'"' -f2)"
+else
+    echo "could not set it: choose Balanced in the battery applet"
 fi
+
+log "No automatic screen dimming, screen-off, sleep or screen lock on AC power"
+# Screen-off and lock power-cycle the docked monitors, which is exactly the
+# hotplug path that can hang KWin on driver 615 (open-gpu-kernel-modules #1392).
+if command -v kwriteconfig6 >/dev/null; then
+    run kwriteconfig6 --file powerdevilrc --group AC --group Display --key DimDisplayWhenIdle false
+    run kwriteconfig6 --file powerdevilrc --group AC --group Display --key TurnOffDisplayWhenIdle false
+    run kwriteconfig6 --file powerdevilrc --group AC --group SuspendAndShutdown --key AutoSuspendAction 0
+    run kwriteconfig6 --file kscreenlockerrc --group Daemon --key Autolock false
+    echo "takes effect at the next login; undo later in System Settings > Power Management and > Screen Locking"
+else
+    echo "kwriteconfig6 not found: set Dim, Turn off screen and Sleep to Never (on AC) and screen locking off by hand"
+fi
+
+log "Lid"
+echo "Keep one lid state for the whole campaign. If you work lid-open with the built-in"
+echo "display disabled, run once: stuttertest kwin set lidcheck=off"
+echo "(otherwise 'gpu=nvidia' is skipped while the lid is open)."
 
 log "GPU pollers (they can add stutter on GSP drivers; keep them closed while testing)"
 pgrep -a -f 'nvtop|mangohud|gwe|coolercontrol|tuxedo-control-center' | grep -v pgrep || echo "none running"

@@ -9,6 +9,9 @@ falls in that window; stuttertest uses this to cut out one test.
 
 A frame is "late" when it was presented more than half a refresh after the
 time KWin targeted. "missed" counts the refresh cycles lost to late frames.
+"triple-buffered" is the share of frames KWin started more than one refresh
+before their target (it only does that when frames run slow); if it stays
+near 0, triple buffering never engaged and an on/off comparison shows nothing.
 Render time includes the multi-GPU copy. KWin overwrites the files at every
 login, and the last row may be incomplete while KWin runs (it is skipped).
 """
@@ -19,7 +22,7 @@ import sys
 
 
 def summarize(path, t_from=None, t_to=None):
-    late = total = missed = vrr = 0
+    late = total = missed = vrr = ahead = 0
     render = []
     try:
         f = open(path, newline="")
@@ -44,6 +47,8 @@ def summarize(path, t_from=None, t_to=None):
             total += 1
             if row.get("vrr") == "1":
                 vrr += 1
+            if target - start > refresh:
+                ahead += 1
             delay = flip - target
             if delay > refresh / 2:
                 late += 1
@@ -53,6 +58,7 @@ def summarize(path, t_from=None, t_to=None):
     out = {"file": path, "frames": total, "late": late, "missed": missed, "vrr": vrr}
     if total:
         out["late_pct"] = 100 * late / total
+        out["tb_pct"] = 100 * ahead / total
     if render:
         render.sort()
         out["render_median"] = statistics.median(render)
@@ -97,7 +103,7 @@ def main(argv):
             continue
         if tsv:
             print("\t".join([name, str(s["frames"]), str(s["late"]), f"{s.get('late_pct', 0):.1f}", str(s["missed"]),
-                             f"{100 * s.get('render_p95', 0):.0f}", f"{100 * s.get('render_max', 0):.0f}", str(s["vrr"])]))
+                             f"{100 * s.get('render_p95', 0):.0f}", f"{100 * s.get('render_max', 0):.0f}", str(s["vrr"]), f"{s.get('tb_pct', 0):.1f}"]))
         elif not s["frames"]:
             print(f"{name}: no frames")
         else:
@@ -105,6 +111,7 @@ def main(argv):
             if "render_median" in s:
                 line += (f", render time median {s['render_median']:.0%} / p95 {s['render_p95']:.0%}"
                          f" / max {s['render_max']:.0%} of a refresh")
+            line += f", {s['tb_pct']:.0f}% triple-buffered"
             if s["vrr"]:
                 line += f", {s['vrr']} frames with adaptive sync (triple buffering is off for those)"
             print(line)
