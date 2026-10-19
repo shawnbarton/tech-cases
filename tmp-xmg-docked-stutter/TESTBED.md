@@ -101,7 +101,13 @@ stuttertest run 0-x11 --duration 60          # only X11 apps (e.g. Discord)
 stuttertest run 0-wayland --duration 60      # only native Wayland apps (e.g. Firefox, Dolphin, System Settings)
 stuttertest run 0-desktop --duration 60      # no apps in focus: cursor over the empty desktop, panel, window drags
 ```
-Whichever runs show the stutter (your yes/no answer plus late frames) define the routine for the rest of the campaign. If only one kind of app shows it, that's a finding in itself: it points at how that kind of app reaches the screen rather than at the desktop as a whole.
+Whichever runs show the stutter (your yes/no answer plus late frames) define the routine for the rest of the campaign. If only one kind of app shows it, that's a finding in itself: it points at how that kind of app reaches the screen rather than at the desktop as a whole. Use the note field to say what exactly stuttered: the cursor, window contents (scrolling, typing), or window movement. That answers your record's open question "cursor only, or window contents too?".
+
+One more Phase 0 check, for the other open question ("internal panel too, or only the externals?"). Temporarily enable the built-in display (it's driven by the Intel GPU) and log out and in. Then repeat whichever run stuttered, using the apps **only on the built-in display**:
+```
+stuttertest run 0-internal --duration 60
+```
+Then go back to your chosen lid/display state and log out and in. The built-in display has no NVIDIA involvement, so if it stays smooth while the Dells stutter, the problem sits in the NVIDIA output path.
 
 **Phase A: hybrid mode, Intel composites, driver 615 open (the default setup)**
 ```
