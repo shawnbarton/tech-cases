@@ -54,7 +54,8 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - The cable swap only ruled out the cable and the monitor. The GPU head and output, the Thunderbolt tunnel and the dock port all stay tied to the connector.
 - The 8 bpc test should work. Per the 580/615 source, the kernel's EDID override reaches NVIDIA, which then drives the link at 24bpp after a modeset, and `/proc/driver/nvidia-modeset/heads` shows it (`edid-8bpc.sh`, `nv-heads`). It hasn't been seen on this machine yet, and one forum report (382464) says the DRM override was ignored. The old Ubuntu attempt was only ever checked in sysfs, so it never proved 8 bpc.
 - 615 also has `nvidia-modeset.max_output_color_depth=8`.
-- Never tested and decisive for dock versus GPU side: a direct USB-C→DP cable, and a single monitor on that port.
+- **Confirmed (runs 004–006):** 30bpp on DP-2 → static; 24bpp → none.
+- DP-2's path runs through an MST hub in the dock; DP-3's doesn't. A direct USB-C→DP cable (single-stream, no hub) would tell whether the hub path or NVIDIA's 30bpp MST output is at fault. That only matters for a bug report.
 
 - `prime-select` never changes which GPU KWin composites on. TUXEDO's Wayland dGPU mode only offloads apps, which adds a second copy.
 
@@ -80,4 +81,19 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - Seen: **no static and no blanking.** This is the first run without static under the trigger that brought it every time before.
 - Earlier the same day, still at 30bpp, static appeared during the logout animation to the login screen. So it isn't tied to the session or to particular apps.
 - Late frames unchanged: 6.3% and 5.5%. After a pause 25% and 27%; back-to-back 2.9% and 1.9%. Both Dells late together far above chance. The bit depth doesn't affect the stutter.
-- Pending: the depth `try` reported (24bpp expected), and the control: `undo` to 30bpp, does the static come back, then `try` again.
+- `edid-8bpc.sh status` confirmed DP-2 at **24bpp** and DP-3 at 30bpp.
+
+**005-s-10bpc-konsole-dp2** and **006-s-8bpc-2** (2026-10-20). The control for run 004:
+- `undo` put DP-2 back at 30bpp: **static again**, marked 20 times in 30 s.
+- `try` again, 24bpp: **no static**.
+- `undo` and `try` re-set the mode the same way, so the blink itself isn't what clears it.
+- **Conclusion: 30bpp output on DP-2's path triggers the static, and 24bpp removes it.**
+- Late frames: run 005, 1.3% and 2.7%; run 006, 4.1% and 2.8%. Same kinds and rates as before; the user saw no clear stutter.
+- The marks in run 005 don't line up with late frames (8/20, against ~51% by chance). The static isn't a timing event.
+
+**DP-2's path has an MST hub.**
+- NVIDIA names DP-2's monitor `DELL S2721QS (DP-0.2)`. An address suffix means NVKMS sees it behind a DisplayPort branch device (`nvAllocDpyEvo` adds it to `displayPortMSTIds`). DP-3's monitor is `(DP-2)`, without one.
+- That matches `card0-DP-1` showing "disconnected": that's the physical port in MST mode, and `DP-2` is the stream behind it.
+- So the two dock ports differ: one goes through an MST hub, the other doesn't. The record's "no MST" was wrong for that port.
+- A similar, earlier NVIDIA bug (forum 155374, about 2021): content-dependent static on Thunderbolt docks, "only affects Multi Stream Transport setups", root-caused and fixed by NVIDIA at the time.
+- MST connectors are created dynamically, so after a re-plug the name `DP-2` could change. If the static ever returns, check `edid-8bpc.sh status` for the current names.
