@@ -9,16 +9,19 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 | Path | What |
 |---|---|
 | `TESTBED.md` | Distro choice, install, setup, test campaign, what to send back |
-| `testbed/setup/fedora/` | `01-base.sh` (update, RPM Fusion, tools), `02-nvidia.sh` (driver branch, open or proprietary modules, GSP on/off), `03-sessions.sh` (GNOME and COSMIC), `knobs.sh` (nvidia_drm vblank, Dynamic Boost), `edid-8bpc.sh` (8 bpc EDID override, until reboot or from boot) |
-| `testbed/patterns/` | Test patterns for the static: `static-patterns.html` (Firefox, GPU-drawn) and `term-patterns.sh` (Konsole, CPU-drawn) |
+| `testbed/setup/fedora/` | `01-base.sh` (update, RPM Fusion, tools), `02-nvidia.sh` (driver branch, open or proprietary modules, GSP on/off), `03-sessions.sh` (GNOME and COSMIC), `knobs.sh` (nvidia_drm vblank, Dynamic Boost, nvidia-modeset debug messages), `edid-8bpc.sh` (8 bpc EDID override, until reboot or from boot) |
+| `testbed/patterns/` | Test patterns for the static: `static-patterns.html` (Firefox, GPU-drawn) and `term-patterns.sh` (Konsole, CPU-drawn); `workload.html`, the same screen activity for every A/B run |
 | `testbed/setup/install-testbed.sh` | Installs the tools and KWin login script, sets Adaptive Sync to Never on the Dells, fixes the power profile |
 | `testbed/bin/stuttertest` | Test harness: system report, KWin settings, timed test runs with per-test frame statistics, results table |
 | `testbed/bin/kwin-perf-summary` | Summarizes KWin's frame timing log (`KWIN_LOG_PERFORMANCE_DATA`) into late frames and render time |
-| `testbed/bin/stutter-analyze` | Where a run's late frames come from: rendering vs. after rendering, bursts, both monitors at once vs. chance, P-state changes (`stuttertest analyze`) |
+| `testbed/bin/stutter-analyze` | A run's late frames by kind (knock-on, after a pause, back-to-back), visible hitches, bursts, both monitors at once vs. chance, static marks, P-state changes (`stuttertest analyze`) |
+| `testbed/bin/nv-heads` | What the NVIDIA display engine sends to each monitor: mode and pixel depth (30bpp/24bpp) |
+| `testbed/trace/flipfence.bt` | Kernel trace of KWin's commits and NVIDIA's flip events (`stuttertest run --trace`) |
 | `testbed/bin/nv-powermizer` | Gets or sets the NVIDIA PowerMizer mode through NVML. Works on Wayland (driver ≥ 580.65.06) |
 | `testbed/bin/dgpu-run` | Runs a program on the NVIDIA GPU (PRIME render offload) |
-| `testbed/kwin/50-kwin-docked-gpu.sh` | Plasma login script: triple buffering, compositing GPU, safety margin, frame log (docked only) |
+| `testbed/kwin/50-kwin-docked-gpu.sh` | Plasma login script: triple buffering, compositing GPU, safety margin, software cursor, full repaints, frame log (docked only) |
 | `testbed/clockfloor/` | Optional service: NVIDIA clock lock only while docked on AC, with installer and uninstaller |
+| `notes/2026-10-20-analysis.md` | Source-checked analysis of runs 001–002 and the static, with references |
 | `notes/plan-tuxedo-os.md` | Earlier analysis and plan for the TUXEDO OS install, superseded |
 | `tests/` | Tests for all of the above against fake sysfs, NVML, nvidia-smi, KWin, dnf and akmods. `tests/run-all.sh` runs them with no GPU needed |
 
@@ -27,9 +30,9 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with skeptical review (2026-10-20). Details: `notes/2026-10-20-analysis.md`.
 
 **Stutter (late frames)**
-- Late frames are real: the flip lands one vblank after KWin's target. It isn't just a late report. KWin's flip times on NVIDIA are software timestamps (`ktime_get()` when nvidia-drm sends the event; no DRM vblank support in 580, or in 615 by default).
+- Late flips land on the vblank grid, exactly one refresh after KWin's target, not at jittery times. That points to a flip that latched late. A report delayed by exactly one vblank isn't ruled out yet; the kernel trace (Phase T) can tell them apart. KWin's flip times on NVIDIA are software timestamps (`ktime_get()` when nvidia-drm sends the event; no DRM vblank support in 580, or in 615 by default).
 - About half of all late frames are knock-ons of an earlier late frame.
-- The rest are mostly the **first frame after a pause** of one or more refreshes: about 40% of those are late, against about 2% of back-to-back frames. The rate doesn't grow with longer pauses, so a deep power-state wake-up doesn't fit.
+- Of the rest, most (pooled over both runs) are the **first frame after a pause** of one or more refreshes. Frames after a pause are late 24–43% of the time (28% and 24% in run 001, 41% and 43% in run 002), against 1–2% of back-to-back frames. The rate doesn't grow with longer pauses, so a deep power-state wake-up doesn't fit.
 - Many late frames repeat a picture that didn't change, so they're invisible. The analyzer now counts the ones that delayed new content.
 - Rendering cost is ruled out. Caveat: KWin's "render end" doesn't prove the frame was ready for the NVIDIA side. It leaves out the copy's wait and the time NVIDIA takes to signal it.
 - Open candidates:
@@ -43,10 +46,13 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - KWin 6.8.0 attaches the copy's fence to the commit on NVIDIA (IN_FENCE_FD). That is a future A/B once Fedora ships it.
 
 **Static on DP-2**
-- It isn't a marginal DP link. DP scrambling changes the bit pattern of the same picture every frame, so random link errors would twinkle anywhere regardless of content. The record also shows static at 1080p60 and 4K30, where the link has plenty of margin.
-- Static that stays while a window is on DP-2 and changes with it points to something deterministic on that connector's pixel path, or to an event triggered by redraws. On the path, that means NVIDIA's output at 30bpp, or the Thunderbolt/dock DP path.
+- Random bit errors on a marginal DP link are unlikely to cause window-tied static. DP scrambling changes the bit pattern of the same picture every frame, so such errors would twinkle anywhere regardless of content. (That reasoning is from the scrambler's design; the VESA text wasn't read.) The record also shows static at 1080p60, which runs at a lower lane rate, and that argues against signal integrity.
+- Static that stays while a window is on DP-2 and changes with it points to something deterministic, or to an event triggered by redraws. The candidates:
+  - NVIDIA's 30bpp output for that connector;
+  - the Thunderbolt tunnel or the dock's DP port handling 30-bit data;
+  - bad pixels kept in the picture NVIDIA scans out.
 - The cable swap only ruled out the cable and the monitor. The GPU head and output, the Thunderbolt tunnel and the dock port all stay tied to the connector.
-- The 8 bpc test is valid. The kernel's EDID override reaches NVIDIA, which then drives the link at 24bpp after a modeset, and `/proc/driver/nvidia-modeset/heads` proves it (`edid-8bpc.sh`, `nv-heads`). The old Ubuntu attempt was only ever checked in sysfs, so it never proved 8 bpc.
+- The 8 bpc test should work. Per the 580/615 source, the kernel's EDID override reaches NVIDIA, which then drives the link at 24bpp after a modeset, and `/proc/driver/nvidia-modeset/heads` shows it (`edid-8bpc.sh`, `nv-heads`). It hasn't been seen on this machine yet, and one forum report (382464) says the DRM override was ignored. The old Ubuntu attempt was only ever checked in sysfs, so it never proved 8 bpc.
 - 615 also has `nvidia-modeset.max_output_color_depth=8`.
 - Never tested and decisive for dock versus GPU side: a direct USB-C→DP cable, and a single monitor on that port.
 

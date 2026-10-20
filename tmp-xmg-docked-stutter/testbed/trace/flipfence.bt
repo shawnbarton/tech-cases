@@ -12,7 +12,9 @@
  *
  * CRTC index -> connector: crtc index == nvidia head (nvidia-drm-crtc.c creates CRTCs in head
  * order); read the mapping with
- *   for d in /sys/kernel/debug/dri/*/; do grep -q nvidia-drm $d/name && sudo grep -A1 '^connector\[' $d/state; done
+ *   sudo sh -c 'for d in /sys/kernel/debug/dri/*/; do grep -q nvidia-drm $d/name && grep -A1 "^connector\[" $d/state; done'
+ * (stuttertest run --trace saves this as crtc-map.txt). KWin names each commit thread after its
+ * connector (DP-2, DP-3 ...); the filters below match any "DP-" thread.
  * which prints "connector[ID]: DP-2" followed by "crtc=crtc-N"; N is the index used by the
  * drm:drm_vblank_event_delivered "crtc" field and nv_drm_handle_flip_occurred's head.
  *
@@ -28,7 +30,7 @@ BEGIN { printf("# t_ns EVENT fields  (main tid=%d)\n", $1); }
 
 /* (a) commit-thread readiness check: KWin FileDescriptor::isReadable() = poll(fd,1,0) */
 tracepoint:syscalls:sys_enter_poll
-/ (comm == "DP-2" || comm == "DP-3") && args.nfds == 1 && args.timeout_msecs == 0 /
+/ strncmp(comm, "DP-", 3) == 0 && args.nfds == 1 && args.timeout_msecs == 0 /
 {
   @inpoll[tid] = nsecs;
 }
@@ -120,7 +122,7 @@ kprobe:drm_read
 /* who wakes the commit threads (timer expiry vs. kwin_wayland notify after pageFlipped) and
    how long they wait for a CPU */
 tracepoint:sched:sched_wakeup
-/ args.comm == "DP-2" || args.comm == "DP-3" /
+/ strncmp(args.comm, "DP-", 3) == 0 /
 {
   @wk[args.pid] = nsecs;
   printf("%llu WAKE %s by %s/%d\n", nsecs, args.comm, comm, tid);

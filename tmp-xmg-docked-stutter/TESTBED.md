@@ -66,6 +66,8 @@ Your `edid_setup` 8 bpc installer targets initramfs-tools with GRUB or kernelstu
 
 Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps KDE's login screen.
 
+**After each update of this folder** (`git pull`), re-run `../install-testbed.sh` from `testbed/setup/fedora`. It links new commands such as `nv-heads` into `~/.local/bin` and is safe to repeat.
+
 ## 4. How a test works
 
 - `stuttertest run NAME [--clock …] --duration 90` measures one test while you use the desktop. It then shows, per monitor, the late frames, missed refreshes and the share of frames KWin triple-buffered. It asks whether you saw stutter and whether you saw static/corruption (yes/no), plus an optional one-line note. The terminal beeps when the time is up.
@@ -114,6 +116,8 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
 
 ## 5. Test campaign
 
+Commands with a path (`testbed/...`) run from the `tmp-xmg-docked-stutter` folder. Commands starting with `./` (`./02-nvidia.sh`, `./knobs.sh`) run from `testbed/setup/fedora`, as in §3. `stuttertest` and `nv-heads` work from anywhere.
+
 **Phase 0: find the triggers** (default setup, one login). Use one app per 60 s run. Use it normally on the Dells (scroll, type, switch views), and drag its window from one Dell to the other a few times. Mark every static or blanking moment (§4).
 ```
 stuttertest run 0-konsole --duration 60      # e.g. run `ls -lR /usr` so output scrolls
@@ -160,11 +164,13 @@ stuttertest run s-konsole-mem --clock mem --duration 30    # memory clock held a
 stuttertest run s-konsole-p0 --clock p0 --duration 30      # NVIDIA GPU held at full power
 stuttertest run s-konsole-smi --smi --duration 30          # logging P-state changes
 ```
-Full repaints, so nothing on screen survives from an earlier frame:
+Full repaints, with NVIDIA compositing so that what gets repainted is what NVIDIA scans out. In hybrid mode KWin still copies only the changed area to NVIDIA. Keep something moving over the static area, such as the test-pattern page in A mode (step 3): a still screen isn't repainted at all.
 ```
-stuttertest kwin set repaint=full          # log out and in
+stuttertest kwin set gpu=nvidia repaint=full   # log out and in (lid closed, or lidcheck=off as in §3)
 stuttertest run s-fullrepaint --duration 30
-stuttertest kwin set repaint=default       # log out and in
+stuttertest kwin set gpu=nvidia                # same, without full repaints, for comparison
+stuttertest run s-nvidia --duration 30
+stuttertest kwin set gpu=default repaint=default   # log out and in
 ```
 For the blanking, one run with NVIDIA's display-driver messages on. It floods the kernel log, so not during timing runs. The run folder's `kernel.log` then shows whether a blank lines up with a DP link interrupt or a retrain:
 ```
@@ -185,15 +191,22 @@ Step with the arrow keys and press S (static) or C (clean) on each pattern, and 
 - `edid-8bpc.sh` changes only that EDID field, checks it with `edid-decode`, and keeps the original. It switches DP-2 to another refresh rate and back, so the screen blinks twice; that's the modeset. Then it reads NVIDIA's own report of the depth.
 - Run it inside the Plasma session, on 580.
 ```
-cd testbed/setup/fedora
-./edid-8bpc.sh status        # "What NVIDIA sends": both 30bpp 4:4:4
-./edid-8bpc.sh try DP-2      # ends with "DP-2 now gets: 24bpp 4:4:4"
+testbed/setup/fedora/edid-8bpc.sh status        # "What NVIDIA sends": both 30bpp 4:4:4
+testbed/setup/fedora/edid-8bpc.sh try DP-2      # ends with "DP-2 now gets: 24bpp 4:4:4"
 stuttertest run s-8bpc-konsole-dp2 --duration 30      # plus the patterns that showed static
-./edid-8bpc.sh undo          # "DP-2 now gets: 30bpp 4:4:4"
+testbed/setup/fedora/edid-8bpc.sh undo          # "DP-2 now gets: 30bpp 4:4:4"
 stuttertest run s-10bpc-konsole-dp2 --duration 30     # does it come back?
 ```
-- `try` lasts until reboot (or `undo`). If 8 bpc cures it, `./edid-8bpc.sh boot DP-2 DP-3` makes it permanent: a firmware file plus the `drm.edid_firmware` kernel argument. Reboot, then check `status`. `./edid-8bpc.sh boot-off` undoes it.
-- With driver 615 there is also a direct switch: the kernel argument `nvidia-modeset.max_output_color_depth=8`, which applies to all monitors.
+- The source says this works on 580 and 615; it hasn't been seen on this machine yet.
+- **If `try` still says 30bpp:** run `undo`, and send the output of `nv-heads` and `cat /proc/driver/nvidia-modeset/dpys`. There are two other routes: 615's switch below, or NVIDIA's own EDID override file.
+- **If it says "no modeset":** KWin didn't switch modes, so there's no result. Send the warning shown above it.
+- `try` lasts until reboot or `undo`. Keep using `try` during the campaign. Only after it, if 8 bpc cures the static, make it permanent with `testbed/setup/fedora/edid-8bpc.sh boot DP-2 DP-3`: a firmware file plus the `drm.edid_firmware` kernel argument. Reboot, then check `status`. `boot-off` undoes it.
+- `boot` ties the EDID to the connector name, not to the monitor. Anything plugged into the port named DP-2 gets the Dell's EDID, including the direct cable or another screen, and connector names can move after a BIOS-mode or driver change. Run `boot-off` before Phases C to E, the hardware tests, or connecting other displays. Run `status` after any BIOS or driver change. Recovery if a boot leaves the Dells black is in §6.
+- **Driver 615 has a direct switch, for all monitors:**
+  - On: `sudo grubby --update-kernel=ALL --args=nvidia-modeset.max_output_color_depth=8`, reboot.
+  - Check: `cat /sys/module/nvidia_modeset/parameters/max_output_color_depth` and `nv-heads`.
+  - Undo: `sudo grubby --update-kernel=ALL --remove-args=nvidia-modeset.max_output_color_depth`, reboot.
+  - Blanking seen on 615 may be its own bug, #1391 (blanking on memory-clock changes).
 
 **5. Hardware tests, the ones your record never did:**
 - **A direct USB-C→DP cable** from the laptop's Thunderbolt port to the DP-2 monitor, without the dock. This skips the Thunderbolt tunnel and the dock's DP port, but keeps NVIDIA's output.
@@ -205,7 +218,7 @@ How to read Phase S:
 - **Static gone at a confirmed 24bpp, and back at 30bpp:** 30bpp output on DP-2's path triggers it. That path is NVIDIA's output for that connector, or the tunnel and dock handling 30-bit data, so the direct cable decides which. Either way, keeping 8 bpc (`boot`) is the fix. At most, gradients band slightly more; Windows does the same.
 - **Static still there at a confirmed 24bpp:** the 10 bpc idea is ruled out.
 - **Direct cable clean, dock port not:** the dock or the tunnel. **Direct cable shows it too:** NVIDIA's side.
-- **Frozen on a still screen, gone with full repaints:** the bad pixels are stored somewhere until that area is redrawn.
+- **Frozen on a still screen, and gone in `s-fullrepaint` but not in `s-nvidia`:** the bad pixels sit in the picture NVIDIA scans out until that area is redrawn.
 - **Same patterns show static in Firefox and in Konsole:** the content matters, not the app. **Only Konsole's patterns:** how the app's picture reaches KWin matters. Likewise for System Settings versus Konsole.
 - **`mem` or `p0` stops it while the baseline doesn't:** GPU power-state changes play a part. Your record says a clock lock didn't help before.
 - **Blanks line up with DP interrupts or retrains in `s-debug`:** the link really drops. Then it's the dock, the tunnel or NVIDIA's DP handling, so the direct cable decides.
@@ -297,9 +310,12 @@ Then switch the BIOS back to **Hybrid**.
   - The first flip after a pause needs more lead time than KWin's ~2.3 ms. NVIDIA latches it a refresh late.
   - Workaround: keep `margin=3500`. It's a login setting, and it costs ~2.5 ms of latency.
   - If the back-to-back rate and "both late together" fall too, late-delivered flip events were part of it.
-- **`a5-w-swcursor` (and more so `-mouse`) cuts it:**
+- **`a4-w-margin` is worse than `a1-w`:** KWin now checks the copy's fence earlier, so the fence wasn't ready yet: the copy, or NVIDIA's signal of it, comes late.
+- **`a5-w-swcursor-mouse` cuts it compared with `a1-w-mouse`:**
   - Cursor-only commits re-time KWin's frames. nvidia-drm reports them done at once, without a real flip.
   - Workaround: keep `cursor=sw`.
+  - `a5-w-swcursor` (mouse still) is the control: with no cursor moves it should match `a1-w`.
+- **`a5-w-swcursor-mouse` is worse than `a1-w-mouse`:** cursor commits had been moving KWin's frames earlier, which helped. That supports the lead-time explanation, so try `a4`.
 - **Neither changes much:** Phase T says which step is late.
 - **"Visible hitches"** is the number to compare with what you see. Late frames that only repeat an unchanged picture don't show.
 - **`a2-tb-off` clearly worse than `a1` in what you see:** your old TUXEDO install (Plasma 6.6, triple buffering off on NVIDIA) was partly that. Triple buffering doesn't change when commits happen; it lets KWin render further ahead.
@@ -314,7 +330,11 @@ Then switch the BIOS back to **Hybrid**.
 - **Driver 615 (Phase E only) and monitor power-cycles:** after a DisplayPort monitor power-cycles behind a dock or hub, KWin can hang waiting on the GPU firmware ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392); one report is an RTX 4070 laptop in hybrid mode). That includes automatic screen-off, which `install-testbed.sh` turns off on AC. If it hits:
   1. Press Alt+SysRq + S, U, B, a few seconds apart. `01-base.sh` enables exactly these three; holding the power button also works.
   2. After the reboot, go back to the default with `./02-nvidia.sh 580-open` and skip the rest of Phase E.
-- **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default`.
+- **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default cursor=default repaint=default`.
+- **The Dells stay black after `edid-8bpc.sh boot`:**
+  1. Open the lid: the built-in display doesn't use the override, and run `testbed/setup/fedora/edid-8bpc.sh boot-off`, then reboot.
+  2. Or, at power-on, hold Shift (or press Esc) to show the GRUB menu. Press `e`, delete `drm.edid_firmware=...` from the `linux` line, and press Ctrl+X. Then run `boot-off`.
+- **Undocked with `boot` active:** the override keeps adding modes to the disconnected connectors (NVIDIA PR #1430). Run `boot-off` when the campaign is over.
 - **A driver switch fails:**
   - `./02-nvidia.sh` restores the previous build settings when the package transaction fails.
   - `./02-nvidia.sh status`, the akmods output, and `/var/cache/akmods/<nvidia or nvidia-580xx>/*.log` show why.

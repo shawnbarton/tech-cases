@@ -49,3 +49,29 @@ echo "### independent, slow renders: coincidence near chance, frames not ready"
 python3 -I "$A" "$T/independent"
 echo "### usage / empty dir"
 python3 -I "$A" | head -2; mkdir "$T/empty"; python3 -I "$A" "$T/empty" | sed "s#$T##"
+echo "### late-frame kinds on hand-made frames (asserted)"
+mkdir "$T/kinds"
+python3 - "$T/kinds" <<'PY'
+import sys
+r = 16_666_667
+H = "target pageflip timestamp,pageflip timestamp,render start,render end,safety margin,refresh duration,vrr,tearing,predicted render time\n"
+rows, t, flip = [], 10**12, None
+def add(target, late, span_ms):
+    global flip
+    flip = target + (r if late else 0)
+    rows.append(f"{target},{flip},{target - 2 * r},{target - 2 * r + int(span_ms * 1e6)},2000000,{r},0,0,{r}\n")
+add(t, False, 3)                 # first frame
+add(flip + r, False, 3)          # back-to-back, on time
+add(flip + 3 * r, True, 2)       # first after a pause, late, new content (span = 2 ms)
+add(flip, True, 1)               # knock-on (planned before the late flip landed), nothing new
+add(flip + r, False, 3)          # back-to-back, on time
+add(flip + r, True, 3)           # back-to-back, late, new content
+open(f"{sys.argv[1]}/perf-DP-2.csv", "w").write(H + "".join(rows))
+open(f"{sys.argv[1]}/meta.txt", "w").write("name=kinds\n")
+PY
+out=$(python3 -I "$A" "$T/kinds")
+echo "$out" | grep -E 'kinds:|late rate'
+ok=1
+echo "$out" | grep -q 'kinds: 1 knock-on, 1 first after a pause, 1 back-to-back; 2 of 3 delayed new content' || ok=
+echo "$out" | grep -q 'late rate after a pause: 1/1 (100.0%); back-to-back: 1/3 (33.3%)' || ok=
+if [ -n "$ok" ]; then echo "kinds: as expected"; else echo "FAIL: late-frame kinds changed"; exit 1; fi

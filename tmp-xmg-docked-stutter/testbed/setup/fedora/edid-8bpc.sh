@@ -21,8 +21,9 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 NV_PCI=0000:01:00.0
 NV_HEADS=$HERE/../../bin/nv-heads
-# SETUP_SYS / SETUP_FIRMWARE / SETUP_CMDLINE / SETUP_KCONFIG exist for the test suite only.
+# SETUP_SYS / SETUP_DEBUGFS / SETUP_FIRMWARE / SETUP_CMDLINE / SETUP_KCONFIG exist for the test suite only.
 SYS=${SETUP_SYS:-/sys}
+DEBUGFS=${SETUP_DEBUGFS:-/sys/kernel/debug}
 FWDIR=${SETUP_FIRMWARE:-/usr/lib/firmware}/edid
 CMDLINE=${SETUP_CMDLINE:-/proc/cmdline}
 KCONFIG=${SETUP_KCONFIG:-/lib/modules/$(uname -r)/config}
@@ -109,44 +110,83 @@ build() {
     echo "$out"
 }
 
-# A full modeset makes NVKMS pick the depth again: switch to another mode of the same
-# size and back (keeps rotation, scale and position); disable/enable if that's not possible.
-force_modeset() {
-    local conn=$1 ids cur other
-    ids=$(kscreen-doctor -j 2>/dev/null | python3 -I -c '
+# Mode facts for CONNECTOR from kscreen-doctor: "cur temp" mode ids (temp = the lowest-refresh
+# mode of the same size, which needs the least bandwidth), DISABLED, or nothing if not found.
+modes_of() {
+    kscreen-doctor -j 2>/dev/null | python3 -I -c '
 import json, sys
 conn = sys.argv[1]
 for o in json.load(sys.stdin).get("outputs", []):
-    if o.get("name") != conn or not o.get("enabled"):
+    if o.get("name") != conn:
         continue
+    if not o.get("enabled"):
+        print("DISABLED"); break
     modes = {str(m["id"]): m for m in o.get("modes", [])}
     cur = modes.get(str(o.get("currentModeId")))
     if not cur:
         break
     same = [m for k, m in modes.items() if k != str(cur["id"]) and m.get("size") == cur.get("size")]
     if same:
-        other = min(same, key=lambda m: abs(m.get("refreshRate", 0) - cur.get("refreshRate", 0)))
-        print(cur["id"], other["id"])
-' "$conn") || ids=''
-    if [ -n "$ids" ]; then
-        read -r cur other <<< "$ids"
-        run kscreen-doctor "output.$conn.mode.$other" >/dev/null
-        [ -n "$DRYRUN" ] || sleep 3
-        run kscreen-doctor "output.$conn.mode.$cur" >/dev/null
-    else
-        run kscreen-doctor "output.$conn.disable" >/dev/null
-        [ -n "$DRYRUN" ] || sleep 3
-        run kscreen-doctor "output.$conn.enable" >/dev/null
+        temp = min(same, key=lambda m: m.get("refreshRate", 0))
+        print(cur["id"], temp["id"])
+    else:
+        print(cur["id"], "-")
+    break
+' "$1" || true
+}
+current_mode() { kscreen-doctor -j 2>/dev/null | python3 -I -c '
+import json, sys
+for o in json.load(sys.stdin).get("outputs", []):
+    if o.get("name") == sys.argv[1]:
+        print(o.get("currentModeId"))
+' "$1" || true; }
+kd() {   # kscreen-doctor, non-fatal; its messages go to stdout and its exit status is unreliable
+    local out
+    if [ -n "$DRYRUN" ]; then echo "[dry-run] kscreen-doctor $*"; return 0; fi
+    out=$(kscreen-doctor "$@" 2>&1) || true
+    case $out in *"not found"*|*failed*) warn "kscreen-doctor $*: $out"; return 1 ;; esac
+    return 0
+}
+
+# A full modeset makes NVKMS pick the depth again: switch to another mode of the same size
+# and back (keeps rotation, scale and position). If interrupted, it switches back first.
+# Returns 1 if no modeset could be confirmed.
+force_modeset() {
+    local conn=$1 info cur temp
+    info=$(modes_of "$conn")
+    case $info in
+        '') warn "$conn: not among KWin's outputs (monitor off?); skipped"; return 1 ;;
+        DISABLED) warn "$conn: disabled in Display settings; skipped (the override applies when it's enabled)"; return 1 ;;
+    esac
+    read -r cur temp <<< "$info"
+    if [ "$temp" = - ]; then
+        warn "$conn: no other mode of the same size to switch to; skipped"
+        return 1
     fi
+    trap 'kscreen-doctor "output.'"$conn"'.mode.'"$cur"'" >/dev/null 2>&1; exit 130' INT TERM
+    kd "output.$conn.mode.$temp" || { trap - INT TERM; return 1; }
     [ -n "$DRYRUN" ] || sleep 3
+    if [ -z "$DRYRUN" ] && [ "$(current_mode "$conn")" != "$temp" ]; then
+        trap - INT TERM
+        warn "$conn: KWin didn't switch modes, so no modeset happened"
+        return 1
+    fi
+    kd "output.$conn.mode.$cur" || warn "$conn: switching back failed; set the mode in Display settings (it was mode $cur)"
+    trap - INT TERM
+    [ -n "$DRYRUN" ] || sleep 3
+    return 0
 }
 
 # Make the kernel re-read CONNECTOR's EDID, re-set its mode, and report the depth.
 apply() {
     local conn=$1 dir depth
     dir=$(conn_dir "$conn") || return 0
+    [ "$(cat "$dir/status" 2>/dev/null)" = connected ] || { warn "$conn: no monitor connected; skipped"; return 0; }
     srun sh -c "echo detect > '$dir/status'"
-    force_modeset "$conn"
+    if ! force_modeset "$conn"; then
+        echo "$conn: no modeset, so its depth didn't change (not a result)"
+        return 0
+    fi
     depth=$("$NV_HEADS" --depth "$conn" 2>/dev/null) || depth='unknown'
     echo "$conn now gets: $depth"
 }
@@ -158,13 +198,51 @@ backup_kwin_config() {
     cp "$f" "$WORK/kwinoutputconfig.json.$(date +%Y%m%d-%H%M%S)"
 }
 
+# The NVIDIA GPU's DRM debugfs directory (root-only; unavailable under Secure Boot lockdown).
+dri_debugfs() {
+    local d
+    for d in $(sudo -n sh -c "ls -d '$DEBUGFS'/dri/*/" 2>/dev/null); do
+        sudo -n grep -qs "$NV_PCI" "${d}name" && { echo "${d%/}"; return 0; }
+    done
+    return 1
+}
+# Connectors with a debugfs EDID override (an earlier version of this script used those;
+# the kernel prefers it over drm.edid_firmware).
+debugfs_overrides() {
+    local dbg c conn
+    dbg=$(dri_debugfs) || return 0
+    for c in $(nv_connectors); do
+        conn=${c##*/card[0-9]-}
+        [ "$(sudo -n cat "$dbg/$conn/edid_override" 2>/dev/null | wc -c)" -gt 0 ] && echo "$conn"
+    done
+    return 0
+}
+
+# Connectors the 8 bpc EDID may still be active on: named in the runtime value, showing an
+# 8 bpc EDID in sysfs that the saved original doesn't have, or getting 24bpp from NVIDIA.
+overridden() {
+    local rt entry c conn info bpc
+    rt=$(runtime_value)
+    for entry in ${rt//,/ }; do case $entry in *:*) echo "${entry%%:*}" ;; esac; done
+    debugfs_overrides
+    for c in $(nv_connectors); do
+        conn=${c##*/card[0-9]-}
+        info=$(edid_py info "$c/edid" 2>/dev/null) || continue
+        read -r bpc _ _ <<< "$info"
+        [ "$bpc" = 8 ] && ls "$WORK/$conn"-*.orig.bin >/dev/null 2>&1 && echo "$conn"
+        case $("$NV_HEADS" --depth "$conn" 2>/dev/null) in 24bpp*) echo "$conn" ;; esac
+    done
+}
+
 cmd_status() {
-    local c conn info bpc name serial boot rt
+    local c conn info bpc name serial boot rt dbgov
     [ -r "$KCONFIG" ] && { grep -q '^CONFIG_DRM_LOAD_EDID_FIRMWARE=y' "$KCONFIG" && echo "kernel: can load EDID files" || echo "kernel: CONFIG_DRM_LOAD_EDID_FIRMWARE is off; this script can't work"; }
     boot=$(tr ' ' '\n' < "$CMDLINE" | grep '^drm.edid_firmware=' || true)
     rt=$(runtime_value)
     echo "boot setting:    ${boot:-none}"
     echo "current setting: $( [ -z "$rt" ] || [ "$rt" = "$CLEARED" ] && echo none || echo "$rt")"
+    dbgov=$(debugfs_overrides | paste -sd' ')
+    [ -z "$dbgov" ] || echo "debugfs override (from an earlier version of this script) on: $dbgov; './edid-8bpc.sh undo' clears it"
     echo "EDID the kernel shows for each monitor:"
     for c in $(nv_connectors); do
         conn=${c##*/card[0-9]-}
@@ -177,9 +255,10 @@ cmd_status() {
 }
 
 cmd_try() {
-    local conn file entries=() value
+    local conn file entry rt value keep=() new=() names=" $* "
     [ $# -gt 0 ] || die "usage: ./edid-8bpc.sh try DP-2 [DP-3]"
     in_session
+    [ -n "$DRYRUN" ] || sudo -v || die "needs sudo"
     [ -e "$PARAM" ] || die "$PARAM is missing (kernel without CONFIG_DRM_LOAD_EDID_FIRMWARE?)"
     check_tools
     backup_kwin_config
@@ -187,24 +266,34 @@ cmd_try() {
     for conn in "$@"; do
         file=$(build "$conn")
         srun install -m 0644 "$file" "$FWDIR/${file##*/}"
-        entries+=("$conn:edid/${file##*/}")
+        new+=("$conn:edid/${file##*/}")
     done
-    value=$(IFS=,; echo "${entries[*]}")
+    # keep entries for other connectors already set (from an earlier try, or the boot setting)
+    rt=$(runtime_value)
+    for entry in ${rt//,/ }; do
+        case $entry in *:*) case $names in *" ${entry%%:*} "*) ;; *) keep+=("$entry") ;; esac ;; esac
+    done
+    value=$(IFS=,; echo "${keep[*]}${keep[*]:+,}${new[*]}")
     log "Override until reboot: $value"
     if [ -n "$DRYRUN" ]; then echo "[dry-run] write '$value' to $PARAM"; else printf '%s' "$value" | sudo tee "$PARAM" >/dev/null; fi
     for conn in "$@"; do apply "$conn"; done
     echo
-    echo "Expect 24bpp above. Then test, and go back with ./edid-8bpc.sh undo (or reboot)."
+    echo "Expect 24bpp above. If it still says 30bpp, see TESTBED.md (Phase S, step 4). Go back with ./edid-8bpc.sh undo (or reboot)."
 }
 
 cmd_undo() {
-    local rt conns=() entry
+    local conns dbg conn
     in_session
-    rt=$(runtime_value)
-    [ -n "$rt" ] && [ "$rt" != "$CLEARED" ] || { echo "no override set (until reboot) right now"; return; }
-    for entry in ${rt//,/ }; do case $entry in *:*) conns+=("${entry%%:*}") ;; esac; done
+    [ -n "$DRYRUN" ] || sudo -v || die "needs sudo"
+    conns=$(overridden | sort -u | paste -sd' ')
+    [ -n "$conns" ] || { echo "nothing to undo: no 8 bpc override active"; return; }
     if [ -n "$DRYRUN" ]; then echo "[dry-run] write '$CLEARED' to $PARAM"; else printf '%s' "$CLEARED" | sudo tee "$PARAM" >/dev/null; fi
-    for entry in "${conns[@]}"; do apply "$entry"; done
+    if dbg=$(dri_debugfs); then
+        for conn in $(debugfs_overrides); do
+            if [ -n "$DRYRUN" ]; then echo "[dry-run] printf reset > $dbg/$conn/edid_override"; else printf reset | sudo tee "$dbg/$conn/edid_override" >/dev/null; fi
+        done
+    fi
+    for conn in $conns; do apply "$conn"; done
     echo "back to the monitors' own EDIDs (expect 30bpp above)."
 }
 

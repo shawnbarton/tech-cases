@@ -35,7 +35,8 @@ KD_SAFETY_MARGIN=
 KD_SW_CURSOR=
 
 # 1 = repaint every frame in full (KWIN_USE_BUFFER_AGE=0) instead of only what changed.
-# Costs GPU time; for telling stored bad pixels from errors on the way out.
+# Costs GPU time. Covers what NVIDIA scans out only with KD_GPU=nvidia: with Intel
+# compositing, KWin still copies just the changed area to the NVIDIA GPU.
 KD_FULL_REPAINT=
 
 # 1 = while docked, write per-output frame timing CSVs ("kwin perf statistics

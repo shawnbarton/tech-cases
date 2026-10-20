@@ -69,6 +69,7 @@ cat > "$T/bin/fake" <<EOS
 T="$T"; LOG="$LOG"; NV="$NV"; me=\$(basename "\$0")
 case \$me in
   sudo)
+    [ "\$1" = -v ] && exit 0
     [ "\$1" = -n ] && shift
     case "\$*" in
       *"echo detect >"*)               # the kernel re-reads the EDID: override if the runtime value names it
@@ -78,11 +79,25 @@ case \$me in
         if [ -n "\$f" ]; then cp "\$T/fw/\$f" "\$dir/edid"; else cp "\$T/orig/\$conn.bin" "\$dir/edid"; fi
         exit 0 ;;
     esac
-    if [ "\$1" = tee ]; then echo "tee \$2 <- \$(cat | tee "\$2")" >> "\$LOG"; exit 0; fi
+    if [ "\$1" = tee ]; then
+      data=\$(cat)
+      case "\$2:\$data" in *edid_override:reset) : > "\$2" ;; *) printf '%s' "\$data" > "\$2" ;; esac   # debugfs: 'reset' clears
+      echo "tee \$2 <- \$data" >> "\$LOG"; exit 0
+    fi
     exec "\$@" ;;
   kscreen-doctor)
     if [ "\$1" = -j ]; then cat "\$T/kscreen.json"; exit 0; fi
     echo "kscreen-doctor \$*" >> "\$LOG"
+    python3 - "\$T/kscreen.json" "\$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); _, out, what, *rest = sys.argv[2].split(".")
+for o in d["outputs"]:
+    if o["name"] == out and what == "mode" and any(str(m["id"]) == rest[0] for m in o["modes"]):
+        o["currentModeId"] = rest[0]
+    elif o["name"] == out and what in ("enable", "disable"):
+        o["enabled"] = what == "enable"
+json.dump(d, open(sys.argv[1], "w"))
+PY
     python3 "\$T/genproc.py" "\$NV" "\$T/proc" ;;   # any mode change = a modeset
   grubby) echo "grubby \$*" >> "\$LOG" ;;
   dracut) echo "dracut \$*" >> "\$LOG" ;;
@@ -107,12 +122,28 @@ echo "### status during"; bash "$E" status 2>&1 | show
 echo "### undo"; bash "$E" undo 2>&1 | show
 echo "runtime value now: '$(cat "$T/sys/module/drm/parameters/edid_firmware")'"; bash "$E" undo 2>&1 | show
 echo "### try DP-2 DP-3, then undo both"; bash "$E" try DP-2 DP-3 2>&1 | grep -E 'Override|now gets' | show; bash "$E" undo 2>&1 | grep 'now gets' | show
-echo "### no mode of the same size -> disable/enable instead"
+echo "### try DP-2, then try DP-3: both stay set; undo restores both"
+bash "$E" try DP-2 2>&1 | grep -E 'Override|now gets' | show; bash "$E" try DP-3 2>&1 | grep -E 'Override|now gets' | show
+bash "$E" undo 2>&1 | grep -E 'now gets' | show; "$NVH" | grep -o '^DP-[0-9]\|[0-9]*bpp' | paste -sd' '
+echo "### an interrupted undo (value already cleared, DP-2 still at 8 bpc) can be run again"
+bash "$E" try DP-2 >/dev/null 2>&1; printf , > "$T/sys/module/drm/parameters/edid_firmware"; bash "$E" undo 2>&1 | grep -E 'now gets|nothing' | show
+echo "### a monitor disabled in Display settings is skipped, not switched back on"
 python3 - "$T/kscreen.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1])); d["outputs"][0]["modes"] = d["outputs"][0]["modes"][:1]; json.dump(d, open(sys.argv[1], "w"))
+d = json.load(open(sys.argv[1])); d["outputs"][0]["enabled"] = False; json.dump(d, open(sys.argv[1], "w"))
 PY
-bash "$E" try DP-3 2>&1 | grep 'now gets' | show; bash "$E" undo >/dev/null 2>&1
+bash "$E" try DP-3 2>&1 | grep -E 'DP-3' | grep -v 'copy:' | show; grep -c 'output.DP-3.enable' "$LOG"
+python3 - "$T/kscreen.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["outputs"][0]["enabled"] = True; d["outputs"][0]["modes"] = d["outputs"][0]["modes"][:1]; json.dump(d, open(sys.argv[1], "w"))
+PY
+echo "### no other mode of the same size -> skipped with a note"
+bash "$E" undo 2>&1 | grep -E 'DP-3' | show
+echo "### a debugfs override left by the old version is reported and cleared"
+mkdir -p "$T/debug/dri/0/DP-2" "$T/debug/dri/0/DP-3"; echo "nvidia-drm dev=0000:01:00.0 unique=0000:01:00.0" > "$T/debug/dri/0/name"
+: > "$T/debug/dri/0/DP-3/edid_override"; cp "$T/fw/edid/xmg-8bpc-DP-2-DB70M43.bin" "$T/debug/dri/0/DP-2/edid_override"
+SETUP_DEBUGFS="$T/debug" bash "$E" status 2>&1 | grep debugfs | show
+SETUP_DEBUGFS="$T/debug" bash "$E" undo 2>&1 | grep -E 'now gets' | show; echo "debugfs DP-2 override now: $(wc -c < "$T/debug/dri/0/DP-2/edid_override") bytes"
 echo "### boot DP-2 DP-3 (nvidia not in the initramfs: no dracut)"; bash "$E" boot DP-2 DP-3 2>&1 | show; ls "$T/etc/dracut.conf.d" | wc -l
 echo "### boot-off"; bash "$E" boot-off 2>&1 | show; ls "$T/fw/edid" | wc -l
 echo "### refusals"
