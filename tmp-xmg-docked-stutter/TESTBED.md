@@ -145,7 +145,31 @@ Two extra checks while the static is visible:
   - blocks or tiles: the picture's contents.
 - **A screenshot** (Print, Spectacle). KWin draws screenshots itself. Static that shows up in the screenshot is in the picture KWin composed. Static that doesn't happens after that: in the copy, the scanout or the link.
 
+**Test patterns: which content brings it up.** Your static stays as long as the same content is on DP-2 and changes when the content does. So a fixed pattern held on DP-2 is a cleaner trigger than a moving window. There are two versions of the same patterns, one drawn by Firefox (GPU) and one by Konsole (CPU):
+```
+firefox testbed/patterns/static-patterns.html   # move it to DP-2, press F for full screen
+```
+Step with the arrow keys and press S (static) or C (clean) on each pattern, and R for the list. A makes the pattern move by a pixel per frame. Then put Konsole full screen on DP-2 (Ctrl+Shift+F) and run `testbed/patterns/term-patterns.sh`: same idea, s or c and Enter at each pattern. Take a photo of the list at the end of each.
+
+**The 8 bpc test: the strongest hypothesis in your record, and it works with NVIDIA after all.**
+- NVIDIA's driver takes an override EDID from the kernel, and it caps a DP link's colour depth at what the EDID says (`nvidia-drm-connector.c` passes it on as `overrideEdid`; `nvkms-dpy.c` sets the DP maximum from the EDID's bits per colour).
+- Your Dells say 10. Windows runs them at 8.
+- `edid-8bpc.sh` changes only that field, checks the result with `edid-decode`, and keeps the original. Do this on driver 580 only: on 615, a monitor power-cycle behind the dock can hang KWin (#1392).
+```
+cd testbed/setup/fedora
+./edid-8bpc.sh status        # DP-2 and DP-3: EDID bpc 10
+./edid-8bpc.sh try DP-2      # then switch the DP-2 Dell off with its button, wait 5 s, on again
+./edid-8bpc.sh status        # DP-2: EDID bpc 8, runtime override yes
+stuttertest run s-8bpc-konsole-dp2 --duration 30      # plus the patterns that showed static
+./edid-8bpc.sh undo          # power-cycle the Dell again
+stuttertest run s-10bpc-konsole-dp2 --duration 30     # does it come back?
+```
+`try` lasts until reboot. If 8 bpc cures it, `./edid-8bpc.sh boot DP-2 DP-3` makes it permanent: firmware file, `drm.edid_firmware` kernel argument, and the initramfs if nvidia-drm loads there. Reboot afterwards. `./edid-8bpc.sh boot-off` undoes it.
+
 How to read Phase S:
+- **Static gone at 8 bpc and back at 10:** the 10 bpc link through that dock port. Keep 8 bpc (`boot`). At most, smooth gradients band slightly more; Windows runs these monitors at 8 bpc too.
+- **The same patterns show static in Firefox and in Konsole:** it's the content on the way to the monitor, not the app.
+- **Only Konsole's patterns show it:** how the app's picture reaches KWin matters.
 - **DP-3 stays clean while DP-2 shows static:** the port again, as in your record (the static followed the dock port when the cables were swapped).
 - **System Settings stays clean while Konsole shows static:** the way the app's picture reaches KWin matters. A pure link problem wouldn't care.
 - **`mem` or `p0` stops it while `p0ctl` doesn't:** the NVIDIA GPU's power-state changes, the same family as the stutter. The clockfloor service is then a workaround for both.

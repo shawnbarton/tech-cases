@@ -9,7 +9,8 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 | Path | What |
 |---|---|
 | `TESTBED.md` | Distro choice, install, setup, test campaign, what to send back |
-| `testbed/setup/fedora/` | `01-base.sh` (update, RPM Fusion, tools), `02-nvidia.sh` (driver branch, open or proprietary modules, GSP on/off), `03-sessions.sh` (GNOME and COSMIC), `knobs.sh` (nvidia_drm vblank, Dynamic Boost) |
+| `testbed/setup/fedora/` | `01-base.sh` (update, RPM Fusion, tools), `02-nvidia.sh` (driver branch, open or proprietary modules, GSP on/off), `03-sessions.sh` (GNOME and COSMIC), `knobs.sh` (nvidia_drm vblank, Dynamic Boost), `edid-8bpc.sh` (8 bpc EDID override, until reboot or from boot) |
+| `testbed/patterns/` | Test patterns for the static: `static-patterns.html` (Firefox, GPU-drawn) and `term-patterns.sh` (Konsole, CPU-drawn) |
 | `testbed/setup/install-testbed.sh` | Installs the tools and KWin login script, sets Adaptive Sync to Never on the Dells, fixes the power profile |
 | `testbed/bin/stuttertest` | Test harness: system report, KWin settings, timed test runs with per-test frame statistics, results table |
 | `testbed/bin/kwin-perf-summary` | Summarizes KWin's frame timing log (`KWIN_LOG_PERFORMANCE_DATA`) into late frames and render time |
