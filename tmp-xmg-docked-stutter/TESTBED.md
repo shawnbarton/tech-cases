@@ -362,6 +362,11 @@ Then switch the BIOS back to **Hybrid**.
   1. Press Alt+SysRq + S, U, B, a few seconds apart. `01-base.sh` enables exactly these three; holding the power button also works.
   2. After the reboot, go back to the default with `./02-nvidia.sh 580-open` and skip the rest of Phase E.
 - **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default cursor=default repaint=default udmabuf=default`.
+- **An unexplained blank in daily use:**
+  1. Note the time and which monitor blanked.
+  2. Run `stuttertest logs` (or `stuttertest logs -6h` for further back) and send the file.
+  3. Check `testbed/setup/fedora/edid-8bpc.sh status`: an edid-8bpc.sh `try` doesn't survive a reboot, and a monitor back at 30bpp brings the old static and blanking back.
+  4. To catch the next blank in detail, `./knobs.sh nvkmsdebug on` and leave it on until it happens, then `stuttertest logs` and `./knobs.sh nvkmsdebug off`.
 - **The Dells stay black after `edid-8bpc.sh boot`:**
   1. Open the lid: the built-in display doesn't use the override, and run `testbed/setup/fedora/edid-8bpc.sh boot-off`, then reboot.
   2. Or, at power-on, hold Shift (or press Esc) to show the GRUB menu. Press `e`, delete `drm.edid_firmware=...` from the `linux` line, and press Ctrl+X. Then run `boot-off`.

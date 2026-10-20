@@ -122,6 +122,9 @@ echo "### --trace (fake bpftrace), and refusing --trace with --smi"
 printf 'n\nn\n\n' | "$ST" run t-trace --trace --duration 2 2>&1 | grep -E 'kernel trace|===' | show
 tail -2 "$T"/home/stuttertest/runs/*-t-trace/trace.log | cut -d' ' -f2-
 "$ST" run t-both --trace --smi --duration 1 2>&1 | tail -1 | show
+echo "### logs (fake journalctl, no nvidia procfs here)"
+"$ST" logs -1h 2>&1 | show
+f=$(ls -t "$T"/home/stuttertest/logs-*.txt | head -1); grep -E '^== |booted|EDID file|fake' "$f" | sed "s#$T##g"
 echo "### applied values recorded"; grep -h '^applied:' "$T"/home/stuttertest/runs/*/meta.txt | show
 kill $KPID; sleep 0.5
 echo "### outside Plasma without --smi -> refuse"; "$ST" run h-gnome --duration 1 2>&1 | show

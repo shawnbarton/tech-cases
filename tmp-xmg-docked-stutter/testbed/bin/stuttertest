@@ -23,6 +23,8 @@
 #                      shortcut bound to 'stuttertest mark' (KWin runs global shortcuts even while
 #                      you drag a window), or press Enter in the terminal after letting go.
 #   stuttertest mark [TEXT]                mark "static seen now" (bind it to a keyboard shortcut)
+#   stuttertest logs [SINCE]               after a blank or other glitch: boot time, depth per monitor, EDID
+#                                          override, kernel and KWin log lines (default: last 3 hours)
 #   stuttertest report                     table of all runs
 #   stuttertest analyze [RUN]              where the late frames come from (default: last run)
 #   stuttertest reset                      undo any clock lock, PowerMizer mode or load
@@ -678,6 +680,33 @@ finish_run() {
 
 cmd_mark() { add_mark "$@"; }
 
+# Everything worth having after an unexplained blank, in one file. Uses sudo for the kernel
+# log, since not every account may read it.
+cmd_logs() {
+    local since=${1:--3h} out ef
+    mkdir -p "$DATA"
+    out=$DATA/logs-$(date +%Y%m%d-%H%M%S).txt
+    ef=$(cat /sys/module/drm/parameters/edid_firmware 2>/dev/null); case $ef in ''|,) ef=none ;; esac
+    {
+        echo "== stuttertest logs since $since, taken $(date -Is)"
+        echo "booted: $(uptime -s 2>/dev/null)   (an edid-8bpc.sh 'try' doesn't survive a reboot)"
+        echo "EDID file override now: $ef   boot: '$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^drm.edid_firmware=//p')'"
+        echo "KWin: $(kwin_env | paste -sd' ')"
+        echo; echo "== What the NVIDIA display engine sends now (30bpp = 10 bits, 24bpp = 8)"
+        "$NV_HEADS" 2>&1
+        echo; echo "== Kernel: NVIDIA, DRM, Thunderbolt, USB"
+        sudo journalctl -q -k --since "$since" --no-pager -o short-iso 2>&1 |
+            grep -iE 'nvidia|nvrm|xid|drm|thunderbolt|i915|hotplug|usb .*(disconnect|new)' || echo "(nothing)"
+        echo; echo "== KWin"
+        journalctl -q --user -u plasma-kwin_wayland.service --since "$since" --no-pager -o short-iso 2>&1 | tail -200 || true
+        echo; echo "== Display configuration changes (kscreen, powerdevil)"
+        journalctl -q --user --since "$since" --no-pager -o short-iso 2>&1 |
+            grep -iE 'kscreen|output.*(connect|disconnect|enabled|disabled)|dpms|powerdevil.*(screen|display)' | tail -100 || echo "(nothing)"
+    } > "$out" 2>&1
+    echo "saved: $out"
+    echo "kernel lines: $(sed -n '/^== Kernel/,/^== KWin/p' "$out" | grep -vc '^==\|^$\|(nothing)')"
+}
+
 cmd_analyze() {
     local rd
     case ${1:-} in
@@ -701,6 +730,7 @@ case ${1:-} in
     report) cmd_report ;;
     analyze) shift; cmd_analyze "$@" ;;
     mark) shift; cmd_mark "$@" ;;
+    logs) shift; cmd_logs "$@" ;;
     reset) cmd_reset ;;
-    *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
