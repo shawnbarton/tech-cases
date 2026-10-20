@@ -51,4 +51,4 @@ if command -v boltctl >/dev/null; then
     echo "If the dock shows as unauthorized: boltctl enroll --policy auto <uuid>"
 fi
 
-log "Done. Reboot if the kernel was updated, then run: ./02-nvidia.sh open"
+log "Done. Reboot if the kernel was updated, then run: ./02-nvidia.sh 580-open"

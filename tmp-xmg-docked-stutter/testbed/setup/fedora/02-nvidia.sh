@@ -1,12 +1,14 @@
 #!/bin/bash
 # Fedora test bed, step 2: install or switch the NVIDIA driver (RPM Fusion akmods).
 #
-#   ./02-nvidia.sh open                 current branch (615.x), open kernel modules (GSP always on)
-#   ./02-nvidia.sh closed               same driver version, proprietary kernel modules, GSP on
-#   ./02-nvidia.sh closed-gsp-off       proprietary kernel modules with GSP firmware disabled
-#   ./02-nvidia.sh legacy-open          580xx branch (580.178.04), open modules
-#   ./02-nvidia.sh legacy-closed        580xx branch, proprietary modules, GSP on
-#   ./02-nvidia.sh legacy-closed-gsp-off
+#   ./02-nvidia.sh 580-open             580 long-term branch (580.178.04), open kernel modules
+#                                       (GSP always on). The test bed's default driver.
+#   ./02-nvidia.sh 580-closed           same driver version, proprietary kernel modules, GSP on
+#   ./02-nvidia.sh 580-closed-gsp-off   proprietary kernel modules with GSP firmware disabled
+#   ./02-nvidia.sh 615-open             RPM Fusion's current branch (615.x), open modules.
+#                                       Comparison only: 615 has open multi-monitor regressions
+#                                       (open-gpu-kernel-modules #1391, #1392).
+#   ./02-nvidia.sh 615-closed | 615-closed-gsp-off
 #   ./02-nvidia.sh status               what is installed, built and loaded
 #
 # Each switch rebuilds the kernel module for the running and the newest installed
@@ -19,7 +21,7 @@ MACROS=$ETC/rpm/macros.nvidia-kmod
 GSPCONF=$ETC/modprobe.d/zz-nvidia-gsp.conf
 AKMODS_KEY=$ETC/pki/akmods/certs/public_key.der
 
-usage() { sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 status() {
     log "Installed NVIDIA packages"
@@ -82,7 +84,7 @@ EOT
 mode=${1:-}
 case $mode in
     status) status; exit 0 ;;
-    open|closed|closed-gsp-off|legacy-open|legacy-closed|legacy-closed-gsp-off) ;;
+    580-open|580-closed|580-closed-gsp-off|615-open|615-closed|615-closed-gsp-off) ;;
     *) usage ;;
 esac
 
@@ -92,10 +94,10 @@ check_secure_boot
 # The two branches ship the same library paths without full Conflicts, so the
 # old branch is removed explicitly in the same transaction.
 case $mode in
-    legacy-*) branch=580xx; kmod=nvidia-580xx
+    580-*) branch=580xx; kmod=nvidia-580xx
               PKGS=(akmod-nvidia-580xx xorg-x11-drv-nvidia-580xx-cuda xorg-x11-drv-nvidia-580xx-cuda-libs)
               OLD=(akmod-nvidia 'kmod-nvidia-[0-9]*' xorg-x11-drv-nvidia 'xorg-x11-drv-nvidia-[a-z]*' nvidia-settings) ;;
-    *) branch=current; kmod=nvidia
+    615-*) branch=current; kmod=nvidia
        PKGS=(akmod-nvidia xorg-x11-drv-nvidia-cuda xorg-x11-drv-nvidia-cuda-libs)
        OLD=(akmod-nvidia-580xx 'kmod-nvidia-580xx-*' 'xorg-x11-drv-nvidia-580xx*' nvidia-settings-580xx) ;;
 esac

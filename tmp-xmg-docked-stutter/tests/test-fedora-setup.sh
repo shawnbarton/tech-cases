@@ -72,13 +72,13 @@ calls() { echo "-- calls:"; show < "$LOG"; }
 files() { echo "-- macro: $(cat "$T/etc/rpm/macros.nvidia-kmod" 2>/dev/null || echo none) | gsp: $(cat "$T/etc/modprobe.d/zz-nvidia-gsp.conf" 2>/dev/null || echo none)"; }
 
 step "01-base.sh (dry run)"; DRYRUN=1 bash "$F/01-base.sh" 2>&1 | grep -E 'dry-run|==>' | show
-step "02-nvidia.sh open"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E '==>|nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; files; calls
-step "02-nvidia.sh closed-gsp-off"; bash "$F/02-nvidia.sh" closed-gsp-off 2>&1 | grep -E 'nvidia [0-9]|error|N/A' | show; echo "exit ${PIPESTATUS[0]}"; files
-step "02-nvidia.sh legacy-open (branch switch)"; bash "$F/02-nvidia.sh" legacy-open 2>&1 | grep -E 'nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; files; grep '^dnf' "$LOG" | show
-step "02-nvidia.sh open again (back from legacy)"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E 'nvidia [0-9]|error' | show; files
-step "akmods ignores the macro -> must fail"; touch "$T/ignore-macro"; bash "$F/02-nvidia.sh" closed 2>&1 | grep -E 'error|nvidia [0-9]' | show; echo "exit ${PIPESTATUS[0]}"; rm -f "$T/ignore-macro"
-step "Secure Boot on, key not enrolled -> stop before building"; echo "SecureBoot enabled" > "$T/sb"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E 'Secure Boot is on|kmodgenca' | show; echo "exit ${PIPESTATUS[0]}"; grep -c '^akmods' "$LOG" | sed 's/^/akmods calls: /'
-step "Secure Boot on, key enrolled -> builds"; touch "$T/enrolled" "$T/etc/pki/akmods/certs/public_key.der"; bash "$F/02-nvidia.sh" open 2>&1 | grep -E 'nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; rm -f "$T/sb" "$T/enrolled"
+step "02-nvidia.sh 615-open"; bash "$F/02-nvidia.sh" 615-open 2>&1 | grep -E '==>|nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; files; calls
+step "02-nvidia.sh 615-closed-gsp-off"; bash "$F/02-nvidia.sh" 615-closed-gsp-off 2>&1 | grep -E 'nvidia [0-9]|error|N/A' | show; echo "exit ${PIPESTATUS[0]}"; files
+step "02-nvidia.sh 580-open (branch switch to the default)"; bash "$F/02-nvidia.sh" 580-open 2>&1 | grep -E 'nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; files; grep '^dnf' "$LOG" | show
+step "02-nvidia.sh 615-open again (back from 580)"; bash "$F/02-nvidia.sh" 615-open 2>&1 | grep -E 'nvidia [0-9]|error' | show; files
+step "akmods ignores the macro -> must fail"; touch "$T/ignore-macro"; bash "$F/02-nvidia.sh" 615-closed 2>&1 | grep -E 'error|nvidia [0-9]' | show; echo "exit ${PIPESTATUS[0]}"; rm -f "$T/ignore-macro"
+step "Secure Boot on, key not enrolled -> stop before building"; echo "SecureBoot enabled" > "$T/sb"; bash "$F/02-nvidia.sh" 615-open 2>&1 | grep -E 'Secure Boot is on|kmodgenca' | show; echo "exit ${PIPESTATUS[0]}"; grep -c '^akmods' "$LOG" | sed 's/^/akmods calls: /'
+step "Secure Boot on, key enrolled -> builds"; touch "$T/enrolled" "$T/etc/pki/akmods/certs/public_key.der"; bash "$F/02-nvidia.sh" 615-open 2>&1 | grep -E 'nvidia [0-9]|error' | show; echo "exit ${PIPESTATUS[0]}"; rm -f "$T/sb" "$T/enrolled"
 step "02-nvidia.sh status"; bash "$F/02-nvidia.sh" status 2>&1 | show | head -12
 step "02-nvidia.sh bogus"; bash "$F/02-nvidia.sh" bogus >/dev/null 2>&1; echo "exit $?"
 step "knobs.sh vblank on / status / off, powerd off"; bash "$F/knobs.sh" vblank on 2>&1 | show; bash "$F/knobs.sh" status 2>&1 | show; bash "$F/knobs.sh" vblank off | show; bash "$F/knobs.sh" powerd off; calls
@@ -86,12 +86,12 @@ step "03-sessions.sh (dry run)"; DRYRUN=1 bash "$F/03-sessions.sh" 2>&1 | grep -
 step "install-testbed.sh (dry run, not in a Plasma session)"; HOME=$T/home DRYRUN=1 bash "$SETUP/install-testbed.sh" 2>&1 | grep -E 'dry-run|==>|run inside|no external' | show
 
 step "freeze on, then a driver switch unlocks/relocks NVIDIA, then freeze off"
-bash "$F/freeze.sh" on | show; bash "$F/02-nvidia.sh" closed 2>&1 | grep -E 'nvidia [0-9]|error' | show
+bash "$F/freeze.sh" on | show; bash "$F/02-nvidia.sh" 615-closed 2>&1 | grep -E 'nvidia [0-9]|error' | show
 grep -E '^dnf versionlock' "$LOG" | show; bash "$F/freeze.sh" off | show
 step "failed package transaction restores the previous settings"
-bash "$F/02-nvidia.sh" open >/dev/null 2>&1; files; touch "$T/dnf-fail"
-bash "$F/02-nvidia.sh" legacy-closed-gsp-off 2>&1 | grep -E 'error' | show; echo "exit ${PIPESTATUS[0]}"; files; rm -f "$T/dnf-fail"
+bash "$F/02-nvidia.sh" 615-open >/dev/null 2>&1; files; touch "$T/dnf-fail"
+bash "$F/02-nvidia.sh" 580-closed-gsp-off 2>&1 | grep -E 'error' | show; echo "exit ${PIPESTATUS[0]}"; files; rm -f "$T/dnf-fail"
 step "branch switch keeps Dynamic Boost disabled if it was disabled"
-echo disabled > "$T/powerd"; bash "$F/02-nvidia.sh" legacy-open >/dev/null 2>&1; grep -E '^systemctl (enable|disable)' "$LOG" | show; rm -f "$T/powerd"
+echo disabled > "$T/powerd"; bash "$F/02-nvidia.sh" 580-open >/dev/null 2>&1; grep -E '^systemctl (enable|disable)' "$LOG" | show; rm -f "$T/powerd"
 step "--rebuild only when the kmod already exists (it does now)"
-bash "$F/02-nvidia.sh" closed >/dev/null 2>&1; grep '^akmods' "$LOG" | show
+bash "$F/02-nvidia.sh" 615-closed >/dev/null 2>&1; grep '^akmods' "$LOG" | show

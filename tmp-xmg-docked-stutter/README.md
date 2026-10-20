@@ -25,4 +25,5 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 - The stutter persisted in BIOS dGPU-only mode, where there are no cross-GPU copies. The leading suspects are therefore on the NVIDIA side, in every mode:
   - NVIDIA's acknowledged low-power vblank latency bug ([NV 4830125 / open-gpu-kernel-modules #650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650)), possibly together with memory-clock switching;
   - KWin before 6.7.3 disabling triple buffering on NVIDIA-driven outputs. The old TUXEDO install ran Plasma 6.6.
+- Driver 595.58.03 and later have an open report of lag on NVIDIA-wired monitors of KDE laptops ([#1090](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1090)), and 615 has open multi-monitor regressions (#1391, #1392). The test bed therefore defaults to the 580 long-term branch and uses 615 only as a comparison.
 - `prime-select` never changes which GPU KWin composites on. TUXEDO's Wayland dGPU mode only offloads apps, which adds a second copy.

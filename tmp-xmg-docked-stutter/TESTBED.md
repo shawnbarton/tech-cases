@@ -7,10 +7,15 @@
 | Need | Fedora KDE 44 |
 |---|---|
 | KWin ≥ 6.7.3 (triple buffering on NVIDIA; switchable off for A/B) | KWin 6.7.5 |
-| Same NVIDIA driver as **open or proprietary** module (GSP on/off A/B without changing version) | RPM Fusion akmods: one macro switches the module type of 615.78.08; a 580xx branch is available too |
+| Same NVIDIA driver as **open or proprietary** module (GSP on/off A/B without changing version) | RPM Fusion akmods: one macro switches the module type, for both 580.178.04 and 615.78.08 |
 | Xwayland ≥ 24.1 (explicit sync for X11 apps on NVIDIA) | 24.1.x |
 | GNOME and COSMIC sessions for cross-checks | official repos |
 | Full Intel media driver (AV1 on Raptor Lake) | RPM Fusion `intel-media-driver` |
+
+**Driver: 580.178.04 (NVIDIA's long-term branch) is the default, 615 is a comparison.**
+- **615:** it has open regressions that would confound the test. Screens blink as the memory clock switches power states ([#1391](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1391)), and KWin can hang after a DisplayPort monitor power-cycles behind a dock ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392)).
+- **595:** there's an open report of lag on monitors wired to the NVIDIA GPU of KDE laptops, including an RTX 4070 laptop. Users say it started with 595.58.03 and 590.48.01 was fine ([#1090](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1090)). Your old install ran 595.71.05. RPM Fusion no longer packages 595 for Fedora 44 anyway.
+- **580:** it predates all of these and is supported until 2028. It isn't known to be clean: your #1915 comment lists stutter on 580.173.02, but that was on COSMIC / KWin 6.6 without triple buffering. It is simply the branch with the fewest known confounders.
 
 Why not the alternatives:
 - **Plasma 6.8:** not yet. 6.8.0 has an open regression, KDE 527251: flicker on DP/USB-C outputs with Intel plus NVIDIA, which is exactly this laptop. Fedora gets 6.8 shortly after Fedora 45 ships (late October), so freeze the stack for the campaign (§3, step 6).
@@ -36,11 +41,11 @@ Your `edid_setup` 8 bpc installer targets initramfs-tools with GRUB or kernelstu
    ./01-base.sh
    reboot
    ```
-3. NVIDIA driver (current branch, open modules):
+3. NVIDIA driver (580 long-term branch, open modules):
    ```
-   ./02-nvidia.sh open
+   ./02-nvidia.sh 580-open
    reboot
-   ./02-nvidia.sh status        # expect 615.78.08 (open), GSP firmware version shown
+   ./02-nvidia.sh status        # expect 580.178.04 (open), GSP firmware version shown
    ```
 4. **Dock.** If the dock asks for authorization: `boltctl list`, then `boltctl enroll --policy auto <uuid>`. Turn both Dells on. **Pick one lid state for the whole campaign:** lid closed, or lid open with the built-in display disabled in Display settings. Then, inside the Plasma session:
    ```
@@ -87,7 +92,7 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
 
   Combine them with commas. The values applied are recorded with the run.
 - **Rules:**
-  - On AC power and docked. No suspend, VT switch, dock re-plug or monitor power-off in the middle of a session: KWin restarts its frame log, and on driver 615 a monitor power-cycle can hang KWin (§6).
+  - On AC power and docked. No suspend, VT switch, dock re-plug or monitor power-off in the middle of a session: KWin restarts its frame log (and on driver 615, in Phase E, a monitor power-cycle can hang KWin; §6).
   - GPU pollers closed: system-monitor GPU widgets, nvtop, mangohud.
   - **Compare clock tests with a baseline from the same login** (a run without `--clock` just before them). Settings that need a new login are compared across logins by nature, so keep everything else identical.
   - `--smi` logs P-states, but adds GPU polling. Use it on a second run of an interesting test.
@@ -109,7 +114,7 @@ stuttertest run 0-internal --duration 60
 ```
 Then go back to your chosen lid/display state and log out and in. The built-in display has no NVIDIA involvement, so if it stays smooth while the Dells stutter, the problem sits in the NVIDIA output path.
 
-**Phase A: hybrid mode, Intel composites, driver 615 open (the default setup)**
+**Phase A: hybrid mode, Intel composites, driver 580 open (the default setup)**
 ```
 stuttertest run a1 --duration 90                       # baseline: KWin 6.7.5, triple buffering on
 stuttertest run a3-mem --clock mem --duration 90
@@ -150,19 +155,23 @@ Then switch the BIOS back to **Hybrid**.
 
 **Phase D: module type, then GSP.** Repeat `a1`, `a3-p0` and `b1` (with the Phase B setting) in each step:
 ```
-./02-nvidia.sh closed && reboot           # proprietary modules, GSP on   -> runs d1-a1, d1-a3-p0, d1-b1
-./02-nvidia.sh closed-gsp-off && reboot   # proprietary modules, GSP off  -> runs d2-a1, d2-a3-p0, d2-b1
-./02-nvidia.sh open && reboot             # back to the default
+./02-nvidia.sh 580-closed && reboot           # proprietary modules, GSP on   -> runs d1-a1, d1-a3-p0, d1-b1
+./02-nvidia.sh 580-closed-gsp-off && reboot   # proprietary modules, GSP off  -> runs d2-a1, d2-a3-p0, d2-b1
+./02-nvidia.sh 580-open && reboot             # back to the default
 ```
 `./02-nvidia.sh status` after each reboot: "GSP Firmware Version" must read N/A in the GSP-off step.
 
-**Phase E: NVIDIA vblank timestamps.** `./knobs.sh vblank on`, reboot, repeat `a1` and `b1` as `e-a1` and `e-b1`, then `./knobs.sh vblank off`.
+**Phase E: driver 615 (comparison).** Avoid monitor power-cycles in this phase (#1392, §6).
+```
+./02-nvidia.sh 615-open && reboot      # repeat a1, a3-p0, a3-p0ctl, b1 as e-a1, e-a3-p0, e-a3-p0ctl, e-b1
+./knobs.sh vblank on && reboot         # 615 only (option added in 610.43.02): repeat a1, b1 as e-vbl-a1, e-vbl-b1
+./knobs.sh vblank off
+./02-nvidia.sh 580-open && reboot      # back to the default
+```
 
 **Phase F: Dynamic Boost off.** `./knobs.sh powerd off`, repeat `a1` as `f-a1`, then `./knobs.sh powerd on`. Otherwise keep it in the same state for every run.
 
-**Phase G: older driver branch.** `./02-nvidia.sh legacy-open`, reboot, repeat `a1`, `a3-p0` and `b1` as `g-…`. Switch back with `./02-nvidia.sh open`. Use this branch for the rest of the campaign if 615 hangs after a monitor power-cycle (§6).
-
-**Phase H, optional: other desktops.** Log into GNOME or COSMIC, dock, and run `stuttertest run h-gnome --smi --duration 90` with the same routine. There's no KWin frame log there, so it records your yes/no answers plus P-states.
+**Phase G, optional: other desktops.** Log into GNOME or COSMIC, dock, and run `stuttertest run g-gnome --smi --duration 90` with the same routine. There's no KWin frame log there, so it records your yes/no answers plus P-states.
 
 **Phase V, optional: video playback (the separate I8 problem).** Only if video matters to you. Play the same local 4K file windowed (`mpv --loop --geometry=50%x50% <file>`) in Phase A and Phase B setups, as `v-a` and `v-b`. Phase B removes the Intel→NVIDIA copy for video too.
 
@@ -172,17 +181,18 @@ Then switch the BIOS back to **Hybrid**.
 - **A lock or PowerMizer mode fixes it:** make it automatic with `testbed/clockfloor/install.sh`. Set `/etc/default/nvidia-clockfloor` to what the winning run used (`MEM_LOCK=<value>`, `GR_MIN=900`, or `METHOD=powermizer PM_MODE=max|consistent`), then `sudo systemctl start nvidia-clockfloor.service`. It only applies while docked on AC.
 - **`d2` (GSP off) fixes it and `d1` (proprietary, GSP on) doesn't:** a firmware-path issue. If `d1` alone fixes it, it's the module flavour.
 - **NVIDIA compositing (B) beats Intel (A) in hybrid mode:** keep `gpu=nvidia` for docked use.
+- **`e-…` (615) clearly worse than the matching 580 runs:** a 615 regression; stay on 580 and add your data to #1391. If 615 is better, the newer driver helps.
 
 ## 6. Known risks and recovery
 
-- **Driver 615 and monitor power-cycles:** after a DisplayPort monitor power-cycles behind a dock or hub, KWin can hang waiting on the GPU firmware ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392); one report is an RTX 4070 laptop in hybrid mode). That includes automatic screen-off, which `install-testbed.sh` turns off on AC. If it hits:
+- **Driver 615 (Phase E only) and monitor power-cycles:** after a DisplayPort monitor power-cycles behind a dock or hub, KWin can hang waiting on the GPU firmware ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392); one report is an RTX 4070 laptop in hybrid mode). That includes automatic screen-off, which `install-testbed.sh` turns off on AC. If it hits:
   1. Press Alt+SysRq + S, U, B, a few seconds apart. `01-base.sh` enables exactly these three; holding the power button also works.
-  2. Then consider Phase G's 580 branch for the rest of the campaign.
+  2. After the reboot, go back to the default with `./02-nvidia.sh 580-open` and skip the rest of Phase E.
 - **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default`.
 - **A driver switch fails:**
   - `./02-nvidia.sh` restores the previous build settings when the package transaction fails.
   - `./02-nvidia.sh status`, the akmods output, and `/var/cache/akmods/<nvidia or nvidia-580xx>/*.log` show why.
-  - `./02-nvidia.sh open` returns to the default.
+  - `./02-nvidia.sh 580-open` returns to the default.
   - If the version lock gets in the way, run `./freeze.sh off`, then switch.
 - **Microcode:** `stuttertest info` prints it. The newest for this CPU (06-b7-01) is 0x137; update the XMG BIOS if it's lower.
 
