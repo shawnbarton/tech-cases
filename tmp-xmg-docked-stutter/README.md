@@ -75,3 +75,9 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
   - DP-3: after a pause 43%; back-to-back 2.0%.
 - The two runs differ in driver *and* activity (run 002 had more pauses), so they don't compare 580 with 615.
 - DP-2 and DP-3 run slightly different modes (59.996 vs 59.997 Hz) although the monitors are identical. Does that follow the port?
+
+**004-s-8bpc-konsole-dp2** (2026-10-20). Driver 580.178.04, after `edid-8bpc.sh try DP-2` (8 bpc EDID on DP-2). Konsole dragged onto DP-2 and back for 30 s.
+- Seen: **no static and no blanking.** This is the first run without static under the trigger that brought it every time before.
+- Earlier the same day, still at 30bpp, static appeared during the logout animation to the login screen. So it isn't tied to the session or to particular apps.
+- Late frames unchanged: 6.3% and 5.5%. After a pause 25% and 27%; back-to-back 2.9% and 1.9%. Both Dells late together far above chance. The bit depth doesn't affect the stutter.
+- Pending: the depth `try` reported (24bpp expected), and the control: `undo` to 30bpp, does the static come back, then `try` again.
