@@ -9,7 +9,12 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/common.sh"
 VBLANK=$ETC/modprobe.d/zz-nvidia-drm-vblank.conf
 
-param() { cat "/sys/module/nvidia_drm/parameters/$1" 2>/dev/null || sudo -n cat "/sys/module/nvidia_drm/parameters/$1" 2>/dev/null || echo '?'; }
+param() {
+    local f=/sys/module/nvidia_drm/parameters/$1
+    [ -d /sys/module/nvidia_drm ] || { echo unloaded; return; }
+    [ -e "$f" ] || { echo "n/a (needs driver 610+)"; return; }
+    cat "$f" 2>/dev/null || sudo -n cat "$f" 2>/dev/null || echo root-only
+}
 
 case ${1:-}:${2:-} in
     status:)

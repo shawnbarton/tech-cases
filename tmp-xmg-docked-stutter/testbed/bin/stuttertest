@@ -114,7 +114,13 @@ gsp_state() {
     v=$(nvidia-smi -q 2>/dev/null | sed -n 's/^[[:space:]]*GSP Firmware Version[[:space:]]*:[[:space:]]*//p' | head -1)
     case $v in ''|N/A) echo off ;; *) echo "on ($v)" ;; esac
 }
-drm_param() { cat "/sys/module/nvidia_drm/parameters/$1" 2>/dev/null || sudo -n cat "/sys/module/nvidia_drm/parameters/$1" 2>/dev/null || echo '?'; }
+# n/a: this driver has no such parameter (vblank is 610+); root-only: 580 makes them 0400 and sudo isn't cached
+drm_param() {
+    local f=/sys/module/nvidia_drm/parameters/$1
+    [ -d /sys/module/nvidia_drm ] || { echo unloaded; return; }
+    [ -e "$f" ] || { echo n/a; return; }
+    cat "$f" 2>/dev/null || sudo -n cat "$f" 2>/dev/null || echo root-only
+}
 power_profile() {
     local p
     p=$(busctl --system get-property net.hadess.PowerProfiles /net/hadess/PowerProfiles net.hadess.PowerProfiles ActiveProfile 2>/dev/null | cut -d'"' -f2)
