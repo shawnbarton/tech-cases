@@ -287,6 +287,13 @@ Send the run folder (`trace.log`, `trace.err`, `crtc-map.txt`). If bpftrace stop
 
 To measure instead of judging by feel: Phase A's `a1-w-mouse` against `a5-w-swcursor-mouse` (step 2) and `a4-w-margin` (step 3).
 
+**Low frame rate in the Overview** (top-left corner): with Intel compositing, KWin draws both 4K screens (at 1.7× scale) on the Intel GPU. Normal use already reaches 66–99% of a refresh in render time (95th percentile, runs 004–007), and the Overview's live thumbnails, blur and animations push it past 100%.
+- Check: `sudo intel_gpu_top` while using the Overview. Render/3D near 100% means the Intel GPU is the limit. Or run `stuttertest run ov-intel --duration 30` while using it; look for render time over 100% of a refresh.
+- Fix: NVIDIA compositing (Phase B): `stuttertest kwin set gpu=nvidia lidcheck=off`, log out and in. `stuttertest info` should then show the NVIDIA render GPU. Compare with `stuttertest run ov-nvidia --duration 30`.
+  - `lidcheck=off` is only safe while the built-in display stays disabled in the lid-open layout.
+  - Watch everyday smoothness: the record saw NVIDIA power-governor stutter with NVIDIA compositing, but on Plasma 6.6 without triple buffering. Undo: `gpu=default`.
+- Staying on Intel: turning off the Blur effect reduces the load.
+
 **Phase B: hybrid mode, NVIDIA composites.** Set `stuttertest kwin set gpu=nvidia`, keep the same lid state (lid closed, or `lidcheck=off` as above), log out and in. `stuttertest info` must show an NVIDIA render GPU.
 ```
 stuttertest run b1 --duration 90
