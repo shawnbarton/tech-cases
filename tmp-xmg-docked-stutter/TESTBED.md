@@ -212,6 +212,18 @@ stuttertest run s-10bpc-konsole-dp2 --duration 30     # does it come back?
 - **A direct USB-C→DP cable** from the laptop's Thunderbolt port to the DP-2 monitor, without the dock. This skips the Thunderbolt tunnel and the dock's DP port, but keeps NVIDIA's output.
 - **That monitor alone on the affected dock port.**
 - If you swap cables again, note whether the 59.996 Hz mode follows the port.
+- **Which socket has the hub, and which chip it is** (driver 580):
+  1. `grep -E '^ *(connector|dpy) ' /proc/driver/nvidia-modeset/dpys`. The monitor shown as `(DP-0.2)` is behind the hub; the one shown as `(DP-2)` is direct. Unplug one monitor's cable at the dock and run it again to see which socket is which.
+  2. To read the hub chip's ID, turn on the driver's debug log, re-plug the dock, then collect the log:
+     ```
+     echo 1 | sudo tee /sys/module/nvidia_modeset/parameters/debug
+     # unplug the dock's Thunderbolt cable, wait 10 s, plug it back in, wait for both monitors
+     sudo journalctl -k -b --no-pager | grep -E 'nvidia-modeset: .*(DP>|DP-DM>|DPCONN>|DPHAL>)' > ~/dp-debug.txt
+     echo 0 | sudo tee /sys/module/nvidia_modeset/parameters/debug
+     grep -E 'HPD v|SINK-OUI|Multistream panel|New device|DSC|Notify Attach' ~/dp-debug.txt
+     ```
+  3. Power-cycling one monitor isn't enough; the whole dock link has to reconnect.
+  4. The `SINK-OUI id(...)` line in the block that also says `Multistream panel detected` is the hub. Common IDs: `0x0024cc90` Synaptics, `0x004ce000` Realtek, `0x00e18000` MegaChips. Send `~/dp-debug.txt`.
 
 How to read Phase S:
 - **No static in the screenshot:** it's added after KWin. Combined with your record (dGPU-only mode and COSMIC too), KWin and the copy are out.

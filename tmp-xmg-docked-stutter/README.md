@@ -51,7 +51,9 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - KWin 6.8.0 attaches the copy's fence to the commit on NVIDIA (IN_FENCE_FD). That is a future A/B once Fedora ships it.
 
 **Static on DP-2**
-- Random bit errors on a marginal DP link are unlikely to cause window-tied static. DP scrambling changes the bit pattern of the same picture every frame, so such errors would twinkle anywhere regardless of content. (That reasoning is from the scrambler's design; the VESA text wasn't read.) The record also shows static at 1080p60, which runs at a lower lane rate, and that argues against signal integrity.
+- Random bit errors on a marginal DP link are unlikely to cause window-tied static. DP scrambling changes the bit pattern of the same picture every frame, so such errors would twinkle anywhere regardless of content. (That reasoning is from the scrambler's design; the VESA text wasn't read.)
+  - Correction: behind an MST hub, NVIDIA always trains the link at its top speed, whatever the resolution (`dp_connectorimpl.cpp` highestAssessedLC). So the record's 1080p60 result doesn't mean a lower link rate on this socket.
+  - What still argues against a weak link: the 8- versus 10-bit cure happens at the same link speed, and the static is tied to the window.
 - Static that stays while a window is on DP-2 and changes with it points to something deterministic, or to an event triggered by redraws. The candidates:
   - NVIDIA's 30bpp output for that connector;
   - the Thunderbolt tunnel or the dock's DP port handling 30-bit data;
@@ -100,7 +102,17 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - NVIDIA names DP-2's monitor `DELL S2721QS (DP-0.2)`. An address suffix means NVKMS sees it behind a DisplayPort branch device (`nvAllocDpyEvo` adds it to `displayPortMSTIds`). DP-3's monitor is `(DP-2)`, without one.
 - That matches `card0-DP-1` showing "disconnected": that's the physical port in MST mode, and `DP-2` is the stream behind it.
 - Both Dells are cabled to the dock identically and look the same in KDE. The difference is inside one socket's path: it goes through an MST hub, the other's doesn't. The record's "no MST" was wrong for that socket. You can see it with `cat /proc/driver/nvidia-modeset/dpys`.
-- Where the hub sits is open: most likely inside the dock, possibly on the laptop side. With the DP-2 Dell on a direct USB-C→DP cable, `nv-heads` decides it: if the name loses the `.2`, the hub is in the dock.
+- Where the hub sits: most likely inside the dock. With the DP-2 Dell on a direct USB-C→DP cable, `nv-heads` decides it: if the name loses the `.2`, the hub is in the dock.
+- **Why the dock has a hub on one socket** (research, 2026-10-20; i-tec's site was unreachable from here, so vendor text comes from search snippets):
+  - i-tec sells the dock for plain USB-C laptops too, with two monitors.
+  - A plain USB-C port gives one DP stream, and two monitors from one stream need an MST hub.
+  - Over Thunderbolt the dock gets two streams. One goes straight to one socket; the other still passes through the hub to the other socket.
+  - A retailer lists the outputs as "2 x DisplayPort 1.2 (MST Splitter)".
+  - Confidence: that a hub is there, high (NVIDIA's driver says so). That this is the reason, likely. Which chip it is, unknown (TESTBED Phase S step 5 shows how to read it).
+- **Why only Linux shows it:**
+  - KWin deliberately limits monitors behind an MST hub to 8 bpc, with the comment ">8bpc is often broken with docks" (`drm_output.cpp:385-388` in 6.7.5). On Intel or AMD graphics this monitor would have got 8 bpc automatically.
+  - nvidia-drm reports neither the MST path nor a `max bpc` property, so on NVIDIA that safeguard never applies.
+  - Windows defaults to 8 bpc. Setting 10 bpc on that monitor in NVIDIA Control Panel under Windows would show whether the hub fails at 10 bpc there too.
 - A similar, earlier NVIDIA bug (forum 155374, about 2021): content-dependent static on Thunderbolt docks, "only affects Multi Stream Transport setups", root-caused and fixed by NVIDIA at the time.
 - MST connectors are created dynamically, so after a re-plug the name `DP-2` could change. If the static ever returns, check `edid-8bpc.sh status` for the current names.
 
