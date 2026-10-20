@@ -15,8 +15,9 @@
 #                      outside Plasma (GNOME, COSMIC) this is the only measurement
 #       --duration N   stop after N seconds instead of waiting for Enter
 #       --force        run even if the nvidia-clockfloor service holds a lock
-#                      While it runs, mark each moment you see static or blanking: press Enter in
-#                      the terminal (type m + Enter without --duration), or run 'stuttertest mark'.
+#                      While it runs, mark each moment you see static or blanking with a keyboard
+#                      shortcut bound to 'stuttertest mark' (KWin runs global shortcuts even while
+#                      you drag a window), or press Enter in the terminal after letting go.
 #   stuttertest mark [TEXT]                mark "static seen now" (bind it to a keyboard shortcut)
 #   stuttertest report                     table of all runs
 #   stuttertest analyze [RUN]              where the late frames come from (default: last run)
@@ -447,7 +448,7 @@ cmd_run() {
     echo ">>> Test '$name' running: do the routine (TESTBED.md section 4) on the docked monitors."
     local line rc end
     if [ -n "$duration" ]; then
-        [ -t 0 ] && echo "    Static or blanking? Press Enter here each time (or use your 'stuttertest mark' shortcut)."
+        [ -t 0 ] && echo "    Static or blanking? Hit your mark shortcut (works mid-drag), or press Enter here after letting go."
         end=$((SECONDS + duration))
         while [ $SECONDS -lt "$end" ]; do
             printf '\r    %3ds left ' $((end - SECONDS))

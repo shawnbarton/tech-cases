@@ -17,6 +17,8 @@ each burst.
 With marks.txt (moments you marked static/blanking during the run): late
 frames, gaps in flips, P-state changes and kernel/KWin log lines near each
 mark, and how often a mark has late frames nearby compared with chance.
+A mark comes a moment after what you saw, so "near" looks mostly back in
+time: late frames from 1.5 s before to 0.25 s after the mark.
 """
 import bisect
 import csv
@@ -126,32 +128,37 @@ def marks_report(run, meta, data, late, changes):
     t0 = int(meta["t0_mono_ns"]) if "t0_mono_ns" in meta else marks[0][0]
     logs = log_lines(os.path.join(run, "kernel.log")) + log_lines(os.path.join(run, "kwin.log"))
     flips = {n: [r["pageflip timestamp"] for r in rows] for n, rows in data.items()}
+    before, after = 1.5e9, 0.25e9
+
+    def in_window(t, m):
+        return m - before <= t <= m + after
+
     print(f"Marks ({len(marks)} times static/blanking was marked):")
     hits = 0
     for m, text in marks:
         parts = []
         near_late = False
         for n in data:
-            k = sum(1 for t in late.get(n, []) if abs(t - m) <= 0.5e9)
+            k = sum(1 for t in late.get(n, []) if in_window(t, m))
             near_late |= k > 0
             fl = [t for t in flips[n] if m - 2e9 <= t <= m]
             gap = max((b - a for a, b in zip(fl, fl[1:])), default=0) / 1e6
-            parts.append(f"{n}: {k} late within 0.5 s, longest flip gap {gap:.0f} ms in the 2 s before")
+            parts.append(f"{n}: {k} late in the 1.5 s before, longest flip gap {gap:.0f} ms in the 2 s before")
         hits += near_late
         print(f"   t+{(m - t0) / 1e9:6.1f}s {text}: " + "; ".join(parts))
         for c, d in (changes or []):
-            if abs(c - m) <= 1e9:
+            if m - 2e9 <= c <= m + 0.5e9:
                 print(f"      nvidia-smi {(c - m) / 1e9:+.1f}s: {d}")
         for t, line in logs:
             if abs(t - m) <= 2e9:
                 print(f"      log {(t - m) / 1e9:+.1f}s: {line[:160]}")
-    # chance: share of evenly spaced moments in the run with a late frame within 0.5 s
+    # chance: share of evenly spaced moments in the run with a late frame in the same window
     lo = min(rows[0]["target pageflip timestamp"] for rows in data.values())
     hi = max(rows[-1]["target pageflip timestamp"] for rows in data.values())
-    probes = [lo + i * (hi - lo) / 200 for i in range(201)]
+    probes = [lo + before + i * (hi - lo - before) / 200 for i in range(201)]
     alll = sorted(t for n in data for t in late.get(n, []))
-    base = sum(1 for p in probes if near(alll, p, 0.5e9)) / len(probes)
-    print(f"   {hits}/{len(marks)} marks had late frames within 0.5 s (by chance ~{100 * base:.0f}% of moments do)")
+    base = sum(1 for p in probes if near(alll, p - (before - after) / 2, (before + after) / 2)) / len(probes)
+    print(f"   {hits}/{len(marks)} marks had late frames just before them (by chance ~{100 * base:.0f}% of moments do)")
 
 
 def main(argv):
