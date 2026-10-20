@@ -33,6 +33,15 @@ def independent(o, t):
     return any(0 <= t - 10**12 - e < 3 * r for e in own[o])
 make("shared", shared)
 make("independent", independent, slow_render=True)
+d = os.path.join(root, "shared")
+with open(os.path.join(d, "meta.txt"), "a") as f:
+    f.write(f"t0_mono_ns={10**12}\nx11_apps=discord\n")
+e = 10**12 + int(events[3])
+with open(os.path.join(d, "marks.txt"), "w") as f:
+    f.write(f"{e + 100_000_000} static\n{10**12 + 59 * 10**9} shortcut\n")
+with open(os.path.join(d, "kernel.log"), "w") as f:
+    f.write(f"[{(e + 300_000_000) / 1e9:12.6f}] host kernel: example line near the first mark\n")
+    f.write(f"[{(e + 9 * 10**9) / 1e9:12.6f}] host kernel: far from any mark\n")
 PY
 echo "### shared cause: coincidence far above chance, frames ready but flipped late"
 python3 -I "$A" "$T/shared"

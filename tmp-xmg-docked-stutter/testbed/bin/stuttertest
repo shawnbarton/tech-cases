@@ -15,6 +15,9 @@
 #                      outside Plasma (GNOME, COSMIC) this is the only measurement
 #       --duration N   stop after N seconds instead of waiting for Enter
 #       --force        run even if the nvidia-clockfloor service holds a lock
+#                      While it runs, mark each moment you see static or blanking: press Enter in
+#                      the terminal (type m + Enter without --duration), or run 'stuttertest mark'.
+#   stuttertest mark [TEXT]                mark "static seen now" (bind it to a keyboard shortcut)
 #   stuttertest report                     table of all runs
 #   stuttertest analyze [RUN]              where the late frames come from (default: last run)
 #   stuttertest reset                      undo any clock lock, PowerMizer mode or load
@@ -130,6 +133,15 @@ power_profile() {
 powerd_state() { systemctl is-active nvidia-powerd.service 2>/dev/null || true; }
 lid_state() { sed 's/.*:[[:space:]]*//' /proc/acpi/button/lid/*/state 2>/dev/null | head -1; }
 kwin_version() { kwin_wayland --version 2>/dev/null | awk '{print $2}'; }
+# X11 apps (through Xwayland) open right now; don't start Xwayland just to ask
+x11_apps() {
+    local a
+    pgrep -x Xwayland >/dev/null || { echo none; return; }
+    have xlsclients || { echo '?'; return; }
+    a=$(xlsclients 2>/dev/null | awk '{print $2}' | sed 's#.*/##' | sort -u | paste -sd, -)
+    echo "${a:-none}"
+}
+add_mark() { mkdir -p "$DATA"; echo "$(mono_ns) ${*:-static}" >> "$DATA/marks.log"; }
 
 docked() {
     local c
@@ -433,14 +445,37 @@ cmd_run() {
     { echo "t0_mono_ns=$t0"; echo "t0_wall=$t0wall"; } >> "$rd/meta.txt"
     echo
     echo ">>> Test '$name' running: do the routine (TESTBED.md section 4) on the docked monitors."
+    local line rc end
     if [ -n "$duration" ]; then
-        local i
-        for ((i = duration; i > 0; i--)); do printf '\r    %3ds left ' "$i"; sleep 1; done; printf '\a\n'
+        [ -t 0 ] && echo "    Static or blanking? Press Enter here each time (or use your 'stuttertest mark' shortcut)."
+        end=$((SECONDS + duration))
+        while [ $SECONDS -lt "$end" ]; do
+            printf '\r    %3ds left ' $((end - SECONDS))
+            if [ -t 0 ]; then
+                read -r -t 1 line; rc=$?
+                if [ $rc -eq 0 ]; then add_mark "${line:-static}"; elif [ $rc -le 128 ]; then sleep 1; fi
+            else
+                sleep 1
+            fi
+        done
+        printf '\a\n'
     else
-        read -r -p "    Press Enter when done. " _
+        while read -r -p "    Press Enter when done (m + Enter marks static). " line && [ -n "$line" ]; do
+            add_mark "$line"
+        done
     fi
     t1=$(mono_ns)
     reset_clocks
+    local t1wall x11
+    t1wall=$(python3 -c 'import time; print(time.time())')
+    x11=$(x11_apps)
+    echo "x11_apps=$x11" >> "$rd/meta.txt"
+    [ -e "$DATA/marks.log" ] && awk -v a="$t0" -v b="$t1" '$1 >= a && $1 <= b' "$DATA/marks.log" > "$rd/marks.txt"
+    [ -s "$rd/marks.txt" ] || rm -f "$rd/marks.txt"
+    if have journalctl; then
+        journalctl -q -k --since "@${t0wall%.*}" --until "@$(( ${t1wall%.*} + 1 ))" -o short-monotonic --no-pager > "$rd/kernel.log" 2>/dev/null
+        journalctl -q --user -u plasma-kwin_wayland.service --since "@${t0wall%.*}" --until "@$(( ${t1wall%.*} + 1 ))" -o short-monotonic --no-pager > "$rd/kwin.log" 2>/dev/null
+    fi
 
     local files=() f out
     if [ -n "$kwin" ]; then
@@ -515,6 +550,12 @@ EOF
         echo "note: some frames used adaptive sync; set Adaptive Sync to Never for triple-buffering comparisons"
     fi
     [ "$pstates" != - ] && echo "nvidia-smi: $pstates"
+    echo "X11 apps open: $x11"
+    [ -s "$rd/marks.txt" ] && echo "static marked: $(wc -l < "$rd/marks.txt") times"
+    local lg
+    for lg in kernel kwin; do
+        [ -s "$rd/$lg.log" ] && echo "$lg log during the run: $(wc -l < "$rd/$lg.log") lines (saved in the run folder)"
+    done
     [ -n "$any" ] && { echo "--- details"; "$ANALYZE" "$rd" | tail -n +2; }
     echo "saved: $rd"
     RUN_DONE=1
@@ -534,6 +575,8 @@ finish_run() {
         mv "$RUN_DIR" "$RUN_DIR-failed" && echo "run not completed: $RUN_DIR-failed"
     fi
 }
+
+cmd_mark() { add_mark "$@"; }
 
 cmd_analyze() {
     local rd
@@ -557,6 +600,7 @@ case ${1:-} in
     run) shift; cmd_run "$@" ;;
     report) cmd_report ;;
     analyze) shift; cmd_analyze "$@" ;;
+    mark) shift; cmd_mark "$@" ;;
     reset) cmd_reset ;;
-    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

@@ -49,6 +49,14 @@ EOS
 printf '#!/bin/sh\n[ "$1" = -v ] && exit 0\n[ "$1" = -n ] && shift\nexec "$@"\n' > "$T/fakebin/sudo"
 printf '#!/bin/sh\nprintf "method return\\n   string \\"KWin Support Information:\\nOpenGL vendor string: NVIDIA Corporation\\nOpenGL renderer string: NVIDIA GeForce RTX 4070 Laptop GPU/PCIe/SSE2\\nOpenGL version string: 4.6.0\\"\\n"\n' > "$T/fakebin/dbus-send"
 printf '#!/bin/sh\nexit 0\n' > "$T/fakebin/systemd-ac-power"
+printf '#!/bin/sh\nprintf "host  /usr/bin/Discord --type=x\\nhost  xeyes\\n"\n' > "$T/fakebin/xlsclients"
+cat > "$T/fakebin/journalctl" <<'EOS'
+#!/bin/sh
+case "$*" in
+  *--user*) python3 -c 'import time; print(f"[{time.monotonic():12.6f}] host kwin_wayland[1]: kwin_wayland_drm: atomic commit failed: Device or resource busy")' ;;
+  *) python3 -c 'import time; print(f"[{time.monotonic() - 2.5:12.6f}] host kernel: nvidia-modeset: fake message")' ;;
+esac
+EOS
 cat > "$T/fakebin/systemctl" <<EOS
 #!/bin/sh
 case "\$*" in
@@ -91,6 +99,13 @@ echo "### KWin /proc entries root-only (Fedora: CAP_SYS_NICE) -> systemd env + w
 STUTTERTEST_NO_PROC=1 "$ST" info 2>/dev/null | grep -E 'KWIN_\* in running|KWIN_LOG|frame logs open' | show
 printf 'n\nn\n\n' | STUTTERTEST_NO_PROC=1 "$ST" run a1-noproc --duration 2 2>&1 | grep -E '===|perf-|error|stuttertest:' | show
 echo "### analyze (last run, then by name)"; "$ST" analyze | show; "$ST" analyze a3-mem | grep -E '^==|nvidia-smi' | show; "$ST" analyze nope 2>&1 | show
+echo "### marks during a run (shortcut-style), X11 apps, run logs"
+python3 -c 'import ctypes, time; ctypes.CDLL(None).prctl(15, b"Xwayland", 0, 0, 0); time.sleep(20)' &
+XPID=$!
+( sleep 1; "$ST" mark shortcut; sleep 0.5; "$ST" mark half screen snow ) &
+printf 'n\ny\nkonsole drag to DP-2\n' | "$ST" run s-marks --duration 4 2>&1 | grep -E '===|X11 apps|static marked|log during|Marks|t\+|log [+-]|marks had' | show
+kill $XPID 2>/dev/null
+cat "$T"/home/stuttertest/runs/*-s-marks/marks.txt | cut -d' ' -f2-
 echo "### applied values recorded"; grep -h '^applied:' "$T"/home/stuttertest/runs/*/meta.txt | show
 kill $KPID; sleep 0.5
 echo "### outside Plasma without --smi -> refuse"; "$ST" run h-gnome --duration 1 2>&1 | show

@@ -71,14 +71,14 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
 - `stuttertest run NAME [--clock …] --duration 90` measures one test while you use the desktop. It then shows, per monitor, the late frames, missed refreshes and the share of frames KWin triple-buffered. It asks whether you saw stutter and whether you saw static/corruption (yes/no), plus an optional one-line note. The terminal beeps when the time is up.
 - The late-frame count is the measurement. It also says *how much* stutter there was when the answer is yes. Your yes/no is the cross-check that the numbers match what you see. Corruption is the separate dock-port bug, recorded per run for free in case it follows a driver or setting.
 - After the per-monitor summary a run prints **details**: how many late frames were ready in time (so the delay came after rendering), whether they come in bursts, and how often both Dells were late at the same moment compared with chance. `stuttertest analyze [RUN]` shows the same for any earlier run.
+- **Mark static and blanking while it happens.** Press Enter in the terminal each time; without `--duration`, type `m` and Enter. Or use a keyboard shortcut: `install-testbed.sh` adds a menu entry "Stuttertest: mark static". Bind a key to it once under System Settings → Keyboard → Shortcuts → Add New → Application. Afterwards the details list each mark, with late frames, gaps between flips, P-state changes (with `--smi`) and kernel or KWin log lines nearby.
+- Each run records by itself which X11 apps were open, and saves the kernel and KWin log for its time window (`kernel.log`, `kwin.log` in the run folder). You don't need to know which apps are X11.
 - `stuttertest report` compares all runs. The results are in `~/stuttertest/`.
 - **The routine** is normal use of the applications where you see the stutter, on the Dells. Phase 0 (§5) pins down which ones. Once chosen, keep it the same for every run (90 s):
   1. 30 s: the app that showed it most: scroll, switch views, type.
-  2. 30 s: a second app, the other kind if both kinds showed it (X11 vs native Wayland).
+  2. 30 s: a second app that showed it.
   3. 20 s: cursor over the empty desktop. On COSMIC that was where it showed.
   4. 10 s: drag a window from one Dell to the other.
-
-  `xlsclients` lists which running apps are X11 (through Xwayland). Electron apps such as Discord usually are. Fedora's Firefox is native Wayland.
 - **Settings that need a new login** (`stuttertest kwin set …`, then log out and back in):
   - `tb=default|on|off`: triple buffering
   - `gpu=default|nvidia`: who composites
@@ -101,19 +101,51 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
 
 ## 5. Test campaign
 
-**Phase 0: find the trigger** (default setup, one login). Use *only* the named kind of activity for each 60 s run:
+**Phase 0: find the triggers** (default setup, one login). Use one app per 60 s run. Use it normally on the Dells (scroll, type, switch views), and drag its window from one Dell to the other a few times. Mark every static or blanking moment (§4).
 ```
-stuttertest run 0-x11 --duration 60          # only X11 apps (e.g. Discord)
-stuttertest run 0-wayland --duration 60      # only native Wayland apps (e.g. Firefox, Dolphin, System Settings)
-stuttertest run 0-desktop --duration 60      # no apps in focus: cursor over the empty desktop, panel, window drags
+stuttertest run 0-konsole --duration 60      # e.g. run `ls -lR /usr` so output scrolls
+stuttertest run 0-dolphin --duration 60
+stuttertest run 0-firefox --duration 60      # scroll a long page
+stuttertest run 0-sysset --duration 60       # System Settings
+stuttertest run 0-desktop --duration 60      # no app: cursor over the empty desktop, panel, menus
+stuttertest run 0-x11app --duration 60       # only if you use one: Discord, Steam, a game
 ```
-Whichever runs show the stutter (your yes/no answer plus late frames) define the routine for the rest of the campaign. If only one kind of app shows it, that's a finding in itself: it points at how that kind of app reaches the screen rather than at the desktop as a whole. Use the note field to say what exactly stuttered: the cursor, window contents (scrolling, typing), or window movement. That answers your record's open question "cursor only, or window contents too?".
+Whichever runs show the stutter (your yes/no answer plus late frames) define the routine for the rest of the campaign. In the note, say what exactly stuttered: the cursor, window contents (scrolling, typing), or window movement. That answers your record's open question "cursor only, or window contents too?".
+
+Why these apps:
+- Konsole, Dolphin, Firefox and System Settings are all native Wayland on Fedora.
+- Konsole and Dolphin are Qt Widgets apps, which most likely draw with the CPU into shared-memory buffers.
+- Firefox and System Settings (Qt Quick) draw with the GPU.
+- Your first runs showed static and blanking when Konsole or Dolphin was dragged onto DP-2, and not right away with Firefox. That makes this split worth a closer look (Phase S).
 
 One more Phase 0 check, for the other open question ("internal panel too, or only the externals?"). Temporarily enable the built-in display (it's driven by the Intel GPU) and log out and in. Then repeat whichever run stuttered, using the apps **only on the built-in display**:
 ```
 stuttertest run 0-internal --duration 60
 ```
 Then go back to your chosen lid/display state and log out and in. The built-in display has no NVIDIA involvement, so if it stays smooth while the Dells stutter, the problem sits in the NVIDIA output path.
+
+**Phase S: the static trigger** (default setup, same login, 30 s each). Drag the named window onto the named Dell and back, about every 5 s, and mark each static or blanking moment:
+```
+stuttertest run s-konsole-dp2 --duration 30                # baseline: does it reproduce?
+stuttertest run s-konsole-dp3 --duration 30                # Konsole onto DP-3 only: the other dock port
+stuttertest run s-sysset-dp2 --duration 30                 # System Settings (GPU-drawn) onto DP-2
+stuttertest run s-konsole-mem --clock mem --duration 30    # Konsole onto DP-2, memory clock held at max
+stuttertest run s-konsole-p0 --clock p0 --duration 30      # Konsole onto DP-2, NVIDIA GPU held at full power
+stuttertest run s-konsole-p0ctl --clock p0ctl --duration 30
+stuttertest run s-konsole-smi --smi --duration 30          # Konsole onto DP-2, logging P-state changes
+```
+Two extra checks while the static is visible:
+- **A phone photo or short video.** The pattern says where it comes from:
+  - fine snow or sparkles: the signal on the link;
+  - horizontal bands or repeated lines: the display engine fetching the picture from memory too late;
+  - blocks or tiles: the picture's contents.
+- **A screenshot** (Print, Spectacle). KWin draws screenshots itself. Static that shows up in the screenshot is in the picture KWin composed. Static that doesn't happens after that: in the copy, the scanout or the link.
+
+How to read Phase S:
+- **DP-3 stays clean while DP-2 shows static:** the port again, as in your record (the static followed the dock port when the cables were swapped).
+- **System Settings stays clean while Konsole shows static:** the way the app's picture reaches KWin matters. A pure link problem wouldn't care.
+- **`mem` or `p0` stops it while `p0ctl` doesn't:** the NVIDIA GPU's power-state changes, the same family as the stutter. The clockfloor service is then a workaround for both.
+- **The marks line up with P-state changes (`s-konsole-smi`) or with bursts of late frames:** same conclusion, measured instead of seen.
 
 **Phase A: hybrid mode, Intel composites, driver 580 open (the default setup)**
 ```

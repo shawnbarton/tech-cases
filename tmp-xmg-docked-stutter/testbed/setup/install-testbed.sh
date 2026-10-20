@@ -22,6 +22,26 @@ for t in stuttertest kwin-perf-summary stutter-analyze nv-powermizer dgpu-run; d
 done
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: $BIN is not in PATH yet; open a new terminal or log out and in" ;; esac
 
+log "Menu entry for marking static during a run (give it a keyboard shortcut)"
+APPS=$HOME/.local/share/applications
+run mkdir -p "$APPS"
+if [ -z "$DRYRUN" ]; then
+    cat > "$APPS/stuttertest-mark.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Stuttertest: mark static
+Comment=Records the moment you saw static or blanking, for the running stuttertest
+Exec=$BIN/stuttertest mark shortcut
+Icon=dialog-warning
+Terminal=false
+Categories=Utility;
+EOF
+else
+    echo "[dry-run] write $APPS/stuttertest-mark.desktop"
+fi
+echo "Bind it once: System Settings > Keyboard > Shortcuts > Add New > Application >"
+echo "'Stuttertest: mark static', then pick a key such as Meta+Ctrl+M."
+
 log "Installing the KWin login script with frame logging on"
 run "$TB/bin/stuttertest" kwin install
 run "$TB/bin/stuttertest" kwin set perf=on >/dev/null

@@ -38,3 +38,11 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 - The late frames come in bursts (21 and 45 bursts, under 250 ms apart).
 - Both Dells go late together. 31 of DP-2's 66 late frames had DP-3 late within one refresh, against about 2.5 by chance. The other way it was 26 of 49, against about 0.8. Chance is measured with the timing shifted 2–10 s, so it keeps the bursts. A GPU-wide event on the NVIDIA side fits that (low-power flip latency, NV 4830125, or a memory-clock change). Slow rendering of one monitor's content doesn't.
 - Open: is this level of lateness below what's noticeable, or does the stutter need the apps from the case (Phase 0)? Does it come back without triple buffering (`a2-tb-off`)? The corruption is there on a current stack too.
+
+**002-0-x11** (2026-10-20). Same setup but driver 580.178.04 open. Despite the name, random apps (Konsole, Dolphin, Firefox are all native Wayland). 60 s.
+- Seen: stutter **not sure**, static **yes**: "Konsole causes static and screen blanking when dragged to DP-2. As does Dolphin. Firefox does not immediately appear to trigger the issue."
+- Measured: 10.6% (DP-2) and 9.5% (DP-3) of frames late. 84% and 93% of them were ready in time, with a median 16–24 ms to spare.
+- Both Dells were late together again: 44 of 78 against about 6 by chance, and 46 of 65 against about 3.
+- Flip times jitter by about 30 µs between frames, so they're when the driver reported each flip, not hardware vblank stamps. Late flips land on the next vblank, 1.0 refresh late (a few 2–4).
+- KWin 6.7 commits a finished frame about 2 ms before vblank (the safety margin). If its buffer's fence isn't signalled then, it moves the frame one refresh later (`drm_commit_thread.cpp`). A frame that finished early can therefore still miss its vblank. That happens if the NVIDIA side signals the copy late, commits slowly, or latches or reports the flip late.
+- Run 002 isn't directly comparable with 001: different driver and different activity.

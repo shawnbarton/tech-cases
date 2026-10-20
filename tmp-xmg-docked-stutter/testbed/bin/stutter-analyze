@@ -14,6 +14,9 @@ state or memory-clock change, late flip events) hits both at once; slow
 rendering of one monitor's content does not.
 With smi.csv (stuttertest run --smi): P-state / memory-clock changes near
 each burst.
+With marks.txt (moments you marked static/blanking during the run): late
+frames, gaps in flips, P-state changes and kernel/KWin log lines near each
+mark, and how often a mark has late frames nearby compared with chance.
 """
 import bisect
 import csv
@@ -92,6 +95,65 @@ def smi_changes(run, meta):
     return out
 
 
+def log_lines(path):
+    """(monotonic_ns, line) from a journalctl -o short-monotonic file."""
+    out = []
+    try:
+        for line in open(path, errors="replace"):
+            if line.startswith("[") and "]" in line:
+                try:
+                    out.append((int(float(line[1:line.index("]")]) * 1e9), line.rstrip()))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def marks_report(run, meta, data, late, changes):
+    path = os.path.join(run, "marks.txt")
+    if not os.path.exists(path):
+        return
+    marks = []
+    for line in open(path):
+        ts, _, text = line.strip().partition(" ")
+        try:
+            marks.append((int(ts), text or "static"))
+        except ValueError:
+            pass
+    if not marks or not data:
+        return
+    t0 = int(meta["t0_mono_ns"]) if "t0_mono_ns" in meta else marks[0][0]
+    logs = log_lines(os.path.join(run, "kernel.log")) + log_lines(os.path.join(run, "kwin.log"))
+    flips = {n: [r["pageflip timestamp"] for r in rows] for n, rows in data.items()}
+    print(f"Marks ({len(marks)} times static/blanking was marked):")
+    hits = 0
+    for m, text in marks:
+        parts = []
+        near_late = False
+        for n in data:
+            k = sum(1 for t in late.get(n, []) if abs(t - m) <= 0.5e9)
+            near_late |= k > 0
+            fl = [t for t in flips[n] if m - 2e9 <= t <= m]
+            gap = max((b - a for a, b in zip(fl, fl[1:])), default=0) / 1e6
+            parts.append(f"{n}: {k} late within 0.5 s, longest flip gap {gap:.0f} ms in the 2 s before")
+        hits += near_late
+        print(f"   t+{(m - t0) / 1e9:6.1f}s {text}: " + "; ".join(parts))
+        for c, d in (changes or []):
+            if abs(c - m) <= 1e9:
+                print(f"      nvidia-smi {(c - m) / 1e9:+.1f}s: {d}")
+        for t, line in logs:
+            if abs(t - m) <= 2e9:
+                print(f"      log {(t - m) / 1e9:+.1f}s: {line[:160]}")
+    # chance: share of evenly spaced moments in the run with a late frame within 0.5 s
+    lo = min(rows[0]["target pageflip timestamp"] for rows in data.values())
+    hi = max(rows[-1]["target pageflip timestamp"] for rows in data.values())
+    probes = [lo + i * (hi - lo) / 200 for i in range(201)]
+    alll = sorted(t for n in data for t in late.get(n, []))
+    base = sum(1 for p in probes if near(alll, p, 0.5e9)) / len(probes)
+    print(f"   {hits}/{len(marks)} marks had late frames within 0.5 s (by chance ~{100 * base:.0f}% of moments do)")
+
+
 def main(argv):
     if len(argv) != 1 or argv[0] in ("-h", "--help"):
         print(__doc__.strip())
@@ -107,7 +169,8 @@ def main(argv):
     late = {}
     print(f"== {os.path.basename(os.path.normpath(run))}: clock={meta.get('clock', '?')} "
           f"kwin={meta.get('kwin_config', '?')} driver={meta.get('driver', '?')} "
-          f"stutter={meta.get('stutter', '?')}")
+          f"stutter={meta.get('stutter', '?')} corruption={meta.get('corruption', '?')}"
+          + (f" x11_apps={meta['x11_apps']}" if "x11_apps" in meta else ""))
     for name, rows in data.items():
         lr = [r for r in rows if is_late(r)]
         late[name] = sorted(r["target pageflip timestamp"] for r in lr)
@@ -149,6 +212,7 @@ def main(argv):
                     for sh in shifts + [-x for x in shifts])
                 print(f"   {a} late -> {b_} also late: {both}/{len(cand)} (by chance ~{chance:.1f})")
     changes = smi_changes(run, meta)
+    marks_report(run, meta, data, late, changes)
     if changes is not None:
         allb = bursts(sorted(t for n in names for t in late[n]), int(0.25e9))
         hit = sum(1 for x in allb if any(x[0] - 1e9 <= c <= x[-1] + 1e9 for c, _ in changes))
