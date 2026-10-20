@@ -14,6 +14,7 @@ import ctypes, os, sys, time
 ctypes.CDLL(None).prctl(15, b"kwin_wayland", 0, 0, 0)    # PR_SET_NAME: comm = kwin_wayland
 os.chdir(sys.argv[1])
 open("kwin perf statistics OLD-1.csv", "w").write("stale file from an earlier session\n")
+os.utime("kwin perf statistics OLD-1.csv", (time.time() - 86400, time.time() - 86400))
 r = 16_666_667
 files = {o: open(f"kwin perf statistics {o}.csv", "w") for o in ("DP-2", "DP-3")}
 for f in files.values():
@@ -48,6 +49,14 @@ EOS
 printf '#!/bin/sh\n[ "$1" = -v ] && exit 0\n[ "$1" = -n ] && shift\nexec "$@"\n' > "$T/fakebin/sudo"
 printf '#!/bin/sh\nprintf "method return\\n   string \\"KWin Support Information:\\nOpenGL vendor string: NVIDIA Corporation\\nOpenGL renderer string: NVIDIA GeForce RTX 4070 Laptop GPU/PCIe/SSE2\\nOpenGL version string: 4.6.0\\"\\n"\n' > "$T/fakebin/dbus-send"
 printf '#!/bin/sh\nexit 0\n' > "$T/fakebin/systemd-ac-power"
+cat > "$T/fakebin/systemctl" <<EOS
+#!/bin/sh
+case "\$*" in
+  "--user show-environment") printf 'HOME=/x\nKWIN_LOG_PERFORMANCE_DATA=1\nKWIN_DRM_DISABLE_TRIPLE_BUFFERING=1\n' ;;
+  *WorkingDirectory*plasma-kwin_wayland*) echo "$T/kwincwd" ;;
+esac
+exit 0
+EOS
 printf '#!/bin/sh\necho "glxgears env: offload=$__NV_PRIME_RENDER_OFFLOAD vendor=$__GLX_VENDOR_LIBRARY_NAME prime=$DRI_PRIME" >> "%s/smi-calls"\nexec sleep 60\n' "$T" > "$T/fakebin/glxgears"
 chmod +x "$T/fakebin/"*
 mkdir -p "$T/tb/bin" "$T/tb/kwin"
@@ -78,6 +87,9 @@ echo "### PowerMizer ignored by the GPU -> refuse"; touch "$T/pm-ignored"; print
 echo "### p0 + gr combo (2 s)"; printf 'maybe\nY\n\nleft monitor static\n' | "$ST" run a3-combo --clock gr=1200,p0 --duration 2 2>&1 | grep -E 'load on|floor|===|perf-' | show
 echo "### p0ctl without an Intel GPU (this container) -> clear error"; printf '\n' | "$ST" run a3-p0ctl --clock p0ctl --duration 1 2>&1 | tail -1 | show
 echo "### bad input"; "$ST" run 'bad name' 2>&1 | show; "$ST" run x --clock turbo 2>&1 | show; "$ST" run y --clock mem=fast 2>&1 | show
+echo "### KWin /proc entries root-only (Fedora: CAP_SYS_NICE) -> systemd env + working dir"
+STUTTERTEST_NO_PROC=1 "$ST" info 2>/dev/null | grep -E 'KWIN_\* in running|KWIN_LOG|frame logs open' | show
+printf 'n\nn\n\n' | STUTTERTEST_NO_PROC=1 "$ST" run a1-noproc --duration 2 2>&1 | grep -E '===|perf-|error|stuttertest:' | show
 echo "### applied values recorded"; grep -h '^applied:' "$T"/home/stuttertest/runs/*/meta.txt | show
 kill $KPID; sleep 0.5
 echo "### outside Plasma without --smi -> refuse"; "$ST" run h-gnome --duration 1 2>&1 | show

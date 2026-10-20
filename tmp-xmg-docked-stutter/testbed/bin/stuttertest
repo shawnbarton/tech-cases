@@ -36,21 +36,53 @@ die() { echo "stuttertest: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 mono_ns() { python3 -c 'import time; print(time.monotonic_ns())'; }
 kwin_pid() { pgrep -u "$(id -u)" -xn kwin_wayland; }
-kwin_env() { local p; p=$(kwin_pid) || return 0; tr '\0' '\n' < "/proc/$p/environ" | grep '^KWIN_' || true; }
-
-# The frame logs the running KWin has open; falls back to its working directory.
-kwin_csv_files() {
-    local p fd t found=''
+# Some distros (Fedora among them) install kwin_wayland with file capabilities
+# (CAP_SYS_NICE), which makes its /proc entries root-only even for its owner.
+# Then fall back to the systemd user environment KWin was started from (Plasma
+# imports the login-script variables there) and to its working directory.
+kwin_proc_ok() {
+    local p
+    p=$(kwin_pid) || return 1
+    [ -z "${STUTTERTEST_NO_PROC:-}" ] && [ -r "/proc/$p/environ" ]
+}
+kwin_env() {
+    local p
     p=$(kwin_pid) || return 0
-    for fd in /proc/"$p"/fd/*; do
-        t=$(readlink "$fd" 2>/dev/null) || continue
-        case $t in */'kwin perf statistics '*.csv) printf '%s\n' "$t"; found=1 ;; esac
-    done
-    if [ -z "$found" ]; then
-        for t in "$(readlink "/proc/$p/cwd")"/kwin\ perf\ statistics\ *.csv; do
-            [ -e "$t" ] && printf '%s\n' "$t"
-        done
+    if kwin_proc_ok; then
+        tr '\0' '\n' < "/proc/$p/environ" | grep '^KWIN_' || true
+    else
+        systemctl --user show-environment 2>/dev/null | grep '^KWIN_' || true
     fi
+}
+kwin_env_source() { if kwin_proc_ok; then echo "KWin process"; else echo "systemd user environment (KWin's /proc entries are root-only)"; fi; }
+kwin_workdir() {
+    local wd
+    wd=$(systemctl --user show -p WorkingDirectory --value plasma-kwin_wayland.service 2>/dev/null)
+    wd=${wd#[-!]}
+    wd=${wd//%h/$HOME}
+    case $wd in ''|'~') wd=$HOME ;; esac
+    echo "$wd"
+}
+
+# The frame logs of the running KWin: the files it has open if /proc allows,
+# otherwise the logs in its working directory written since it started.
+kwin_csv_files() {
+    local p fd t dir found='' start
+    p=$(kwin_pid) || return 0
+    if kwin_proc_ok; then
+        for fd in /proc/"$p"/fd/*; do
+            t=$(readlink "$fd" 2>/dev/null) || continue
+            case $t in */'kwin perf statistics '*.csv) printf '%s\n' "$t"; found=1 ;; esac
+        done
+        [ -n "$found" ] && return 0
+        dir=$(readlink "/proc/$p/cwd")
+    else
+        dir=$(kwin_workdir)
+    fi
+    start=$(( $(date +%s) - $(ps -o etimes= -p "$p" | tr -dc '0-9') - 2 ))
+    for t in "$dir"/kwin\ perf\ statistics\ *.csv; do
+        [ -e "$t" ] && [ "$(stat -c %Y "$t")" -ge "$start" ] && printf '%s\n' "$t"
+    done
     return 0
 }
 
@@ -131,7 +163,7 @@ cmd_info() {
         echo "docked: $(docked && echo yes || echo no)   AC: $(systemd-ac-power 2>/dev/null && echo yes || echo no)   lid: $(lid_state)"
         echo; echo "== KWin session"
         echo "render GPU: $(render_gpu)"
-        echo "KWIN_* in running KWin:"; kwin_env | sed 's/^/  /'
+        echo "KWIN_* in running KWin (from the $(kwin_env_source)):"; kwin_env | sed 's/^/  /'
         echo "KWIN_* in systemd user environment:"; systemctl --user show-environment 2>/dev/null | grep '^KWIN_' | sed 's/^/  /'
         echo "login script: $( [ -e "$ENVFILE" ] && grep '^KD_' "$ENVFILE" | paste -sd' ' || echo 'not installed')"
         echo "frame logs open: $(kwin_csv_files | paste -sd' ')"
@@ -188,7 +220,7 @@ cmd_kwin() {
         show)
             echo "login script ($ENVFILE):"
             if [ -e "$ENVFILE" ]; then grep '^KD_' "$ENVFILE" | sed 's/^/  /'; else echo "  not installed (stuttertest kwin install)"; fi
-            echo "running KWin:"
+            echo "running KWin (from the $(kwin_env_source)):"
             local e; e=$(kwin_env)
             if [ -n "$e" ]; then echo "  ${e//$'\n'/$'\n'  }"; else echo "  no KWIN_* variables"; fi
             echo "  render GPU: $(render_gpu)" ;;
@@ -336,7 +368,7 @@ cmd_run() {
         [ -n "$smi" ] || die "kwin_wayland is not running in your session (outside Plasma, use --smi)"
         kwin=
     elif ! kwin_env | grep -q '^KWIN_LOG_PERFORMANCE_DATA=1'; then
-        die "KWin frame logging is off: stuttertest kwin set perf=on, then log out and back in (docked)"
+        die "KWin frame logging is off (no KWIN_LOG_PERFORMANCE_DATA=1 in the $(kwin_env_source)). Run 'stuttertest kwin set perf=on', make sure the Dells are connected, then log out and back in. 'stuttertest info' shows the details."
     fi
     if [ -e /run/nvidia-clockfloor.state ] && [ -z "$force" ]; then
         die "the nvidia-clockfloor service holds a lock ($(cat /run/nvidia-clockfloor.state)); pause it or use --force"
