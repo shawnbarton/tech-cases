@@ -41,6 +41,11 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
   - Flip events delivered late through NVIDIA's shared lock and worker thread. These carry the "both monitors late together" pattern.
   - KWin main-thread stalls. Konsole and Dolphin draw with the CPU, and KWin uploads their pictures on its main thread (udmabuf import is off by default on Intel and NVIDIA).
 - Tests that tell these apart: a larger safety margin, a software cursor, and a kernel trace (Phase A/T). Clock locks are a weak test, because they don't stop power gating.
+- **Confirmed (run 007): triple buffering hides it.**
+  - With triple buffering off, 34% and 27% of frames are late, and the user saw stutter. With it on (runs 004–006), 1–6% are late and no clear stutter is seen.
+  - With triple buffering KWin starts each frame about two refreshes ahead, which absorbs the NVIDIA-side delays.
+  - Plasma 6.6, which the old install ran, disabled triple buffering on NVIDIA. 6.7.3 re-enabled it.
+  - Keep Plasma ≥ 6.7.3 at its default. On 6.6, `KWIN_DRM_DISABLE_TRIPLE_BUFFERING=0` forces triple buffering on.
 - The old TUXEDO install ran driver 595.71.05, which is in the range of the open lag report [#1090](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1090), and Plasma 6.6, which had triple buffering off on NVIDIA. 615 has its own regressions (#1391 blanking on memory-clock changes, #1392 hangs after a DP power-cycle). The test bed defaults to the 580 long-term branch.
 - [#650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650) (low fps on dGPU-wired external monitors) is tracked as NVIDIA bug 4830125. NVIDIA has not published a cause or a fix.
 - KWin 6.8.0 attaches the copy's fence to the commit on NVIDIA (IN_FENCE_FD). That is a future A/B once Fedora ships it.
@@ -98,3 +103,16 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - Where the hub sits is open: most likely inside the dock, possibly on the laptop side. With the DP-2 Dell on a direct USB-C→DP cable, `nv-heads` decides it: if the name loses the `.2`, the hub is in the dock.
 - A similar, earlier NVIDIA bug (forum 155374, about 2021): content-dependent static on Thunderbolt docks, "only affects Multi Stream Transport setups", root-caused and fixed by NVIDIA at the time.
 - MST connectors are created dynamically, so after a re-plug the name `DP-2` could change. If the static ever returns, check `edid-8bpc.sh status` for the current names.
+
+**007-a2-tb-off** (2026-10-20). Driver 580, 8 bpc still on DP-2, `KWIN_DRM_DISABLE_TRIPLE_BUFFERING=1`. App routine, 90 s.
+- Seen: **stutter yes**, static no.
+- 34.1% (DP-2) and 27.1% (DP-3) of frames late. Back-to-back frames late 35% and 27%, against 1–3% with triple buffering. 0% triple-buffered.
+- Render start moved from ~2 refreshes before the target to ~1. A quarter of the late frames weren't rendered and copied in time.
+- Both Dells late together: 432/822, chance ~293.
+- **Conclusion:** the old install's obvious stutter came from Plasma 6.6 running NVIDIA outputs without triple buffering, on top of the NVIDIA-side delays that are still there.
+
+## Outcome so far
+
+- **Stutter:** Plasma ≥ 6.7.3 with triple buffering at its default (Fedora 44: 6.7.5). Residual late frames (1–6%) remain from the NVIDIA side; the Phase A margin and cursor tests may trim them.
+- **Static on DP-2:** 8 bpc on the Dells (`edid-8bpc.sh boot DP-2 DP-3`, checked with `status`). DP-2's path goes through an MST hub, and 30bpp output over it brings the static.
+- **Driver:** stay on the 580 branch (RPM Fusion `580xx`). 595+ has open lag reports for this kind of setup (#1090), and 615 the dock hang (#1392).
