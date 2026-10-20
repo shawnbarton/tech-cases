@@ -70,7 +70,12 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
 
 - `stuttertest run NAME [--clock …] --duration 90` measures one test while you use the desktop. It then shows, per monitor, the late frames, missed refreshes and the share of frames KWin triple-buffered. It asks whether you saw stutter and whether you saw static/corruption (yes/no), plus an optional one-line note. The terminal beeps when the time is up.
 - The late-frame count is the measurement. It also says *how much* stutter there was when the answer is yes. Your yes/no is the cross-check that the numbers match what you see. Corruption is the separate dock-port bug, recorded per run for free in case it follows a driver or setting.
-- After the per-monitor summary a run prints **details**: how many late frames were ready in time (so the delay came after rendering), whether they come in bursts, and how often both Dells were late at the same moment compared with chance. `stuttertest analyze [RUN]` shows the same for any earlier run.
+- After the per-monitor summary a run prints **details**, and `stuttertest analyze [RUN]` shows the same for any earlier run:
+  - late frames by kind: knock-ons of an earlier late frame, first frames after a pause, and back-to-back frames;
+  - the late rate after a pause and back-to-back;
+  - how many late frames delayed new content: the visible hitches. The others only repeated an unchanged picture;
+  - whether rendering finished in time (that rules out slow rendering, but not a slow NVIDIA side);
+  - bursts, and how often both Dells were late at the same moment compared with chance.
 - **Mark static and blanking while it happens, with a keyboard shortcut.**
   - `install-testbed.sh` adds a menu entry "Stuttertest: mark static". Bind it once under System Settings → Keyboard → Shortcuts → Add New → Application. Pick a key your free hand finds without looking (e.g. Meta+Z).
   - KWin runs global shortcuts even while you're dragging a window. Any other key goes to the drag, and Enter ends it.
@@ -87,6 +92,8 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
   - `tb=default|on|off`: triple buffering
   - `gpu=default|nvidia`: who composites
   - `margin=<µs>|default`: the safety margin before each refresh
+  - `cursor=default|sw`: hardware cursor plane, or the cursor drawn into each frame
+  - `repaint=default|full`: repaint only what changed, or every frame in full
   - `lidcheck=on|off` and `perf=on|off`
 - **Clock settings apply only during the run** and are reset afterwards:
   - `mem[=MHz]`: memory clock lock (default: the highest supported)
@@ -101,6 +108,8 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
   - GPU pollers closed: system-monitor GPU widgets, nvtop, mangohud.
   - **Compare clock tests with a baseline from the same login** (a run without `--clock` just before them). Settings that need a new login are compared across logins by nature, so keep everything else identical.
   - `--smi` logs P-states, but adds GPU polling. Use it on a second run of an interesting test.
+  - `--trace` records a kernel trace (Phase T). Not together with `--smi`.
+  - `nv-heads` shows what NVIDIA sends to each monitor (mode, 30bpp/24bpp). It takes a driver lock, so not during a timed run.
   - Names start with the phase letter; repeats get a suffix (`a1`, `a1-2`, `f-a1-powerd-off`).
 
 ## 5. Test campaign
@@ -128,71 +137,118 @@ stuttertest run 0-internal --duration 60
 ```
 Then go back to your chosen lid/display state and log out and in. The built-in display has no NVIDIA involvement, so if it stays smooth while the Dells stutter, the problem sits in the NVIDIA output path.
 
-**Phase S: the static trigger** (default setup, same login, 30 s each). Drag the named window onto the named Dell and back, about every 5 s, and mark each static or blanking moment:
+**Phase S: the static on DP-2** (default setup, driver 580). What we know:
+- It isn't random link noise. DP scrambling changes the bit pattern of the same picture every frame, so random link errors would twinkle anywhere. It also showed at 1080p60 and 4K30, where the link has plenty of margin.
+- Static that stays while a window is on DP-2 and changes with it points to something deterministic on DP-2's pixel path, or to something redraws trigger.
+- Swapping the cables only ruled out the cable and the monitor. NVIDIA's output for that connector, the Thunderbolt tunnel and the dock port all stay with the connector.
+
+The tests below tell those apart. For each run, drag the named window onto the named Dell and back about every 5 s, and mark each static or blanking moment with your shortcut (§4).
+
+**1. Look first (no tools needed):**
+- **A phone photo or short video.** Fine snow or sparkles means the signal. Horizontal bands or repeated lines mean the display engine. Blocks or tiles mean the picture's contents.
+- **A screenshot (Shift+Print).** KWin redraws screenshots from the windows, on the Intel GPU. No static in the screenshot means it's added after KWin: NVIDIA's output, the tunnel, the dock or the monitor.
+- **On a completely still screen, does the static stay frozen or twinkle?** Turn off Konsole's blinking cursor first: Settings → Edit Current Profile → Cursor. Konsole's blink is a redraw every half second.
+- **During a blank, does the Dell show "no signal"?**
+- **Which mode each port runs:** `nv-heads` shows each connector's refresh rate to 4 decimals. DP-2 has been 59.996 Hz and DP-3 59.997 Hz, on identical monitors.
+
+**2. Runs:**
 ```
 stuttertest run s-konsole-dp2 --duration 30                # baseline: does it reproduce?
 stuttertest run s-konsole-dp3 --duration 30                # Konsole onto DP-3 only: the other dock port
 stuttertest run s-sysset-dp2 --duration 30                 # System Settings (GPU-drawn) onto DP-2
-stuttertest run s-konsole-mem --clock mem --duration 30    # Konsole onto DP-2, memory clock held at max
-stuttertest run s-konsole-p0 --clock p0 --duration 30      # Konsole onto DP-2, NVIDIA GPU held at full power
-stuttertest run s-konsole-p0ctl --clock p0ctl --duration 30
-stuttertest run s-konsole-smi --smi --duration 30          # Konsole onto DP-2, logging P-state changes
+stuttertest run s-konsole-mem --clock mem --duration 30    # memory clock held at max
+stuttertest run s-konsole-p0 --clock p0 --duration 30      # NVIDIA GPU held at full power
+stuttertest run s-konsole-smi --smi --duration 30          # logging P-state changes
 ```
-Two extra checks while the static is visible:
-- **A phone photo or short video.** The pattern says where it comes from:
-  - fine snow or sparkles: the signal on the link;
-  - horizontal bands or repeated lines: the display engine fetching the picture from memory too late;
-  - blocks or tiles: the picture's contents.
-- **A screenshot** (Print, Spectacle). KWin draws screenshots itself. Static that shows up in the screenshot is in the picture KWin composed. Static that doesn't happens after that: in the copy, the scanout or the link.
+Full repaints, so nothing on screen survives from an earlier frame:
+```
+stuttertest kwin set repaint=full          # log out and in
+stuttertest run s-fullrepaint --duration 30
+stuttertest kwin set repaint=default       # log out and in
+```
+For the blanking, one run with NVIDIA's display-driver messages on. It floods the kernel log, so not during timing runs. The run folder's `kernel.log` then shows whether a blank lines up with a DP link interrupt or a retrain:
+```
+testbed/setup/fedora/knobs.sh nvkmsdebug on
+stuttertest run s-debug --duration 30
+testbed/setup/fedora/knobs.sh nvkmsdebug off
+```
 
-**Test patterns: which content brings it up.** Your static stays as long as the same content is on DP-2 and changes when the content does. So a fixed pattern held on DP-2 is a cleaner trigger than a moving window. There are two versions of the same patterns, one drawn by Firefox (GPU) and one by Konsole (CPU):
+**3. Test patterns: which content brings it up.** There are two versions of the same patterns, one drawn by Firefox (GPU) and one by Konsole (CPU):
 ```
 firefox testbed/patterns/static-patterns.html   # move it to DP-2, press F for full screen
 ```
-Step with the arrow keys and press S (static) or C (clean) on each pattern, and R for the list. A makes the pattern move by a pixel per frame. Then put Konsole full screen on DP-2 (Ctrl+Shift+F) and run `testbed/patterns/term-patterns.sh`: same idea, s or c and Enter at each pattern. Take a photo of the list at the end of each.
+Step with the arrow keys and press S (static) or C (clean) on each pattern, and R for the list. A makes the pattern move by a pixel per frame. Then put Konsole full screen on DP-2 (Ctrl+Shift+F) and run `testbed/patterns/term-patterns.sh`: s or c and Enter at each pattern. Take a photo of each list.
 
-**The 8 bpc test: the strongest hypothesis in your record, and it works with NVIDIA after all.**
-- NVIDIA's driver takes an override EDID from the kernel, and it caps a DP link's colour depth at what the EDID says (`nvidia-drm-connector.c` passes it on as `overrideEdid`; `nvkms-dpy.c` sets the DP maximum from the EDID's bits per colour).
-- Your Dells say 10. Windows runs them at 8.
-- `edid-8bpc.sh` changes only that field, checks the result with `edid-decode`, and keeps the original. Do this on driver 580 only: on 615, a monitor power-cycle behind the dock can hang KWin (#1392).
+**4. The 8 bpc test.**
+- NVIDIA drives these Dells at 30bpp (10 bits per colour) because their EDID says 10; Windows uses 8.
+- The kernel's EDID override reaches NVIDIA's driver, which then picks 24bpp at the next modeset (`nvidia-drm-connector.c` `overrideEdid`; `nvkms-dpy.c`/`nvkms-evo.c`).
+- `edid-8bpc.sh` changes only that EDID field, checks it with `edid-decode`, and keeps the original. It switches DP-2 to another refresh rate and back, so the screen blinks twice; that's the modeset. Then it reads NVIDIA's own report of the depth.
+- Run it inside the Plasma session, on 580.
 ```
 cd testbed/setup/fedora
-./edid-8bpc.sh status        # DP-2 and DP-3: EDID bpc 10
-./edid-8bpc.sh try DP-2      # then switch the DP-2 Dell off with its button, wait 5 s, on again
-./edid-8bpc.sh status        # DP-2: EDID bpc 8, runtime override yes
+./edid-8bpc.sh status        # "What NVIDIA sends": both 30bpp 4:4:4
+./edid-8bpc.sh try DP-2      # ends with "DP-2 now gets: 24bpp 4:4:4"
 stuttertest run s-8bpc-konsole-dp2 --duration 30      # plus the patterns that showed static
-./edid-8bpc.sh undo          # power-cycle the Dell again
+./edid-8bpc.sh undo          # "DP-2 now gets: 30bpp 4:4:4"
 stuttertest run s-10bpc-konsole-dp2 --duration 30     # does it come back?
 ```
-`try` lasts until reboot. If 8 bpc cures it, `./edid-8bpc.sh boot DP-2 DP-3` makes it permanent: firmware file, `drm.edid_firmware` kernel argument, and the initramfs if nvidia-drm loads there. Reboot afterwards. `./edid-8bpc.sh boot-off` undoes it.
+- `try` lasts until reboot (or `undo`). If 8 bpc cures it, `./edid-8bpc.sh boot DP-2 DP-3` makes it permanent: a firmware file plus the `drm.edid_firmware` kernel argument. Reboot, then check `status`. `./edid-8bpc.sh boot-off` undoes it.
+- With driver 615 there is also a direct switch: the kernel argument `nvidia-modeset.max_output_color_depth=8`, which applies to all monitors.
+
+**5. Hardware tests, the ones your record never did:**
+- **A direct USB-C→DP cable** from the laptop's Thunderbolt port to the DP-2 monitor, without the dock. This skips the Thunderbolt tunnel and the dock's DP port, but keeps NVIDIA's output.
+- **That monitor alone on the affected dock port.**
+- If you swap cables again, note whether the 59.996 Hz mode follows the port.
 
 How to read Phase S:
-- **Static gone at 8 bpc and back at 10:** the 10 bpc link through that dock port. Keep 8 bpc (`boot`). At most, smooth gradients band slightly more; Windows runs these monitors at 8 bpc too.
-- **The same patterns show static in Firefox and in Konsole:** it's the content on the way to the monitor, not the app.
-- **Only Konsole's patterns show it:** how the app's picture reaches KWin matters.
-- **DP-3 stays clean while DP-2 shows static:** the port again, as in your record (the static followed the dock port when the cables were swapped).
-- **System Settings stays clean while Konsole shows static:** the way the app's picture reaches KWin matters. A pure link problem wouldn't care.
-- **`mem` or `p0` stops it while `p0ctl` doesn't:** the NVIDIA GPU's power-state changes, the same family as the stutter. The clockfloor service is then a workaround for both.
-- **The marks line up with P-state changes (`s-konsole-smi`) or with bursts of late frames:** same conclusion, measured instead of seen.
+- **No static in the screenshot:** it's added after KWin. Combined with your record (dGPU-only mode and COSMIC too), KWin and the copy are out.
+- **Static gone at a confirmed 24bpp, and back at 30bpp:** 30bpp output on DP-2's path triggers it. That path is NVIDIA's output for that connector, or the tunnel and dock handling 30-bit data, so the direct cable decides which. Either way, keeping 8 bpc (`boot`) is the fix. At most, gradients band slightly more; Windows does the same.
+- **Static still there at a confirmed 24bpp:** the 10 bpc idea is ruled out.
+- **Direct cable clean, dock port not:** the dock or the tunnel. **Direct cable shows it too:** NVIDIA's side.
+- **Frozen on a still screen, gone with full repaints:** the bad pixels are stored somewhere until that area is redrawn.
+- **Same patterns show static in Firefox and in Konsole:** the content matters, not the app. **Only Konsole's patterns:** how the app's picture reaches KWin matters. Likewise for System Settings versus Konsole.
+- **`mem` or `p0` stops it while the baseline doesn't:** GPU power-state changes play a part. Your record says a clock lock didn't help before.
+- **Blanks line up with DP interrupts or retrains in `s-debug`:** the link really drops. Then it's the dock, the tunnel or NVIDIA's DP handling, so the direct cable decides.
 
-**Phase A: hybrid mode, Intel composites, driver 580 open (the default setup)**
+**Phase A: what makes frames late** (hybrid mode, Intel composites, driver 580 open; the default setup). Two kinds of runs:
+- **Workload runs** (`-w`): the same screen activity every time, so settings can be compared frame for frame.
+  - Open the workload page twice and put one window on each Dell: `firefox --new-window testbed/patterns/workload.html`, twice.
+  - Keep the mouse still unless the run name says `mouse`, then circle it on a Dell the whole time.
+  - Run 120 s, two loops of the page.
+  - Compare the details: "late rate after a pause", "back-to-back", and how many late frames delayed new content (the visible hitches).
+- **App runs** (the routine, 90 s): what you actually see.
 ```
-stuttertest run a1 --duration 90                       # baseline: KWin 6.7.5, triple buffering on
-stuttertest run a3-mem --clock mem --duration 90
-stuttertest run a3-gr --clock gr --duration 90
-stuttertest run a3-pm-max --clock pm-max --duration 90
-stuttertest run a3-pm-consistent --clock pm-consistent --duration 90
-stuttertest run a3-p0 --clock p0 --duration 90
-stuttertest run a3-p0ctl --clock p0ctl --duration 90
-stuttertest run a1-2 --duration 90                     # baseline again: did anything drift?
+stuttertest run a1-w --duration 120                    # baseline
+stuttertest run a1-w-mouse --duration 120              # baseline, mouse moving
+stuttertest run a1 --duration 90                       # baseline, app routine
 
-stuttertest kwin set tb=off                            # log out/in
-stuttertest run a2-tb-off --duration 90
+stuttertest kwin set margin=3500                       # log out/in: KWin commits ~2.5 ms earlier
+stuttertest run a4-w-margin --duration 120
+stuttertest run a4-margin --duration 90
 
-stuttertest kwin set tb=default margin=3000            # log out/in
-stuttertest run a4-margin3000 --duration 90
-stuttertest kwin set margin=default                    # log out/in before Phase B
+stuttertest kwin set margin=default cursor=sw          # log out/in: cursor drawn into the frames
+stuttertest run a5-w-swcursor --duration 120
+stuttertest run a5-w-swcursor-mouse --duration 120
+stuttertest run a5-swcursor --duration 90
+
+stuttertest kwin set cursor=default tb=off             # log out/in
+stuttertest run a2-tb-off --duration 90                # does the stutter you used to see come back?
+stuttertest kwin set tb=default                        # log out/in
 ```
+Weaker tests: clock holds don't stop the GPU's power gating, so a "no change" proves little.
+```
+stuttertest run a3-w-mem --clock mem --duration 120
+stuttertest run a3-w-p0 --clock p0 --duration 120
+stuttertest run a3-w-p0ctl --clock p0ctl --duration 120
+```
+
+**Phase T, optional: a kernel trace.** It records, for every frame, when KWin's commit went in, whether the copy's fence was ready, when NVIDIA reported the flip, and whether KWin's main thread was late. That separates the explanations directly and changes nothing on the system. Its probes have not been run on this hardware yet.
+```
+sudo dnf install bpftrace
+sudo bpftrace -l 'kprobe:nv_drm_*' | head -3          # NVIDIA probes available? (optional ones)
+stuttertest run t1-w --trace --duration 120            # with the two workload windows open
+```
+Send the run folder (`trace.log`, `trace.err`, `crtc-map.txt`). If bpftrace stops at the start, `trace.err` says why; send that too.
 
 **Phase B: hybrid mode, NVIDIA composites.** Set `stuttertest kwin set gpu=nvidia`, keep the same lid state (lid closed, or `lidcheck=off` as above), log out and in. `stuttertest info` must show an NVIDIA render GPU.
 ```
@@ -237,9 +293,17 @@ Then switch the BIOS back to **Hybrid**.
 **Phase V, optional: video playback (the separate I8 problem).** Only if video matters to you. Play the same local 4K file windowed (`mpv --loop --geometry=50%x50% <file>`) in Phase A and Phase B setups, as `v-a` and `v-b`. Phase B removes the Intel→NVIDIA copy for video too.
 
 **How to read the results:**
-- **Details: "ready but flipped late" near 100%, and both monitors late together far more often than "by chance":** the frames were rendered and copied in time, and something GPU-wide on the NVIDIA side delayed the flip (power state, memory clock, late flip events). Run 001 looked like this. If instead the late frames weren't ready, and the monitors are late independently, the time goes into rendering or the copy: compare Phase B. The logged flip time is when the driver *reported* the flip, so a late report and a late flip look the same in the log. Your yes/no tells them apart.
-- **`a2-tb-off` clearly worse than `a1`:** triple buffering matters. Plasma ≥ 6.7.3 is the fix; your old TUXEDO install (6.6.x) lacked it. If the triple-buffered share stays near 0% in `a1`, triple buffering never engaged and this comparison tells you nothing.
-- **`p0` fixes it and `p0ctl` doesn't:** it's NVIDIA's low-power latency (NV 4830125). That is evidence for [open-gpu-kernel-modules #650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650), and the workaround is a held clock or load while docked.
+- **`a4-w-margin` cuts the "late rate after a pause" well below `a1-w`:**
+  - The first flip after a pause needs more lead time than KWin's ~2.3 ms. NVIDIA latches it a refresh late.
+  - Workaround: keep `margin=3500`. It's a login setting, and it costs ~2.5 ms of latency.
+  - If the back-to-back rate and "both late together" fall too, late-delivered flip events were part of it.
+- **`a5-w-swcursor` (and more so `-mouse`) cuts it:**
+  - Cursor-only commits re-time KWin's frames. nvidia-drm reports them done at once, without a real flip.
+  - Workaround: keep `cursor=sw`.
+- **Neither changes much:** Phase T says which step is late.
+- **"Visible hitches"** is the number to compare with what you see. Late frames that only repeat an unchanged picture don't show.
+- **`a2-tb-off` clearly worse than `a1` in what you see:** your old TUXEDO install (Plasma 6.6, triple buffering off on NVIDIA) was partly that. Triple buffering doesn't change when commits happen; it lets KWin render further ahead.
+- **`p0` cuts the late rates and `p0ctl` doesn't:** the NVIDIA GPU's power states play a part (cf. [#650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650), tracked as NVIDIA bug 4830125, no published cause). Workaround: a held clock or load while docked.
 - **A lock or PowerMizer mode fixes it:** make it automatic with `testbed/clockfloor/install.sh`. Set `/etc/default/nvidia-clockfloor` to what the winning run used (`MEM_LOCK=<value>`, `GR_MIN=900`, or `METHOD=powermizer PM_MODE=max|consistent`), then `sudo systemctl start nvidia-clockfloor.service`. It only applies while docked on AC.
 - **`d2` (GSP off) fixes it and `d1` (proprietary, GSP on) doesn't:** a firmware-path issue. If `d1` alone fixes it, it's the module flavour.
 - **NVIDIA compositing (B) beats Intel (A) in hybrid mode:** keep `gpu=nvidia` for docked use.

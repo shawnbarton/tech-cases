@@ -24,26 +24,48 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 
 ## Current understanding
 
-- The stutter persisted in BIOS dGPU-only mode, where there are no cross-GPU copies. The leading suspects are therefore on the NVIDIA side, in every mode:
-  - NVIDIA's acknowledged low-power vblank latency bug ([NV 4830125 / open-gpu-kernel-modules #650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650)), possibly together with memory-clock switching;
-  - KWin before 6.7.3 disabling triple buffering on NVIDIA-driven outputs. The old TUXEDO install ran Plasma 6.6.
-- Driver 595.58.03 and later have an open report of lag on NVIDIA-wired monitors of KDE laptops ([#1090](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1090)), and 615 has open multi-monitor regressions (#1391, #1392). The test bed therefore defaults to the 580 long-term branch and uses 615 only as a comparison.
+Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with skeptical review (2026-10-20). Details: `notes/2026-10-20-analysis.md`.
+
+**Stutter (late frames)**
+- Late frames are real: the flip lands one vblank after KWin's target. It isn't just a late report. KWin's flip times on NVIDIA are software timestamps (`ktime_get()` when nvidia-drm sends the event; no DRM vblank support in 580, or in 615 by default).
+- About half of all late frames are knock-ons of an earlier late frame.
+- The rest are mostly the **first frame after a pause** of one or more refreshes: about 40% of those are late, against about 2% of back-to-back frames. The rate doesn't grow with longer pauses, so a deep power-state wake-up doesn't fit.
+- Many late frames repeat a picture that didn't change, so they're invisible. The analyzer now counts the ones that delayed new content.
+- Rendering cost is ruled out. Caveat: KWin's "render end" doesn't prove the frame was ready for the NVIDIA side. It leaves out the copy's wait and the time NVIDIA takes to signal it.
+- Open candidates:
+  - NVIDIA needs more than KWin's ~2.3 ms lead time for the first flip after a pause.
+  - Cursor-only commits: nvidia-drm sends their completion event at once, and KWin re-times its next frame from it.
+  - Flip events delivered late through NVIDIA's shared lock and worker thread. These carry the "both monitors late together" pattern.
+  - KWin main-thread stalls. Konsole and Dolphin draw with the CPU, and KWin uploads their pictures on its main thread (udmabuf import is off by default on Intel and NVIDIA).
+- Tests that tell these apart: a larger safety margin, a software cursor, and a kernel trace (Phase A/T). Clock locks are a weak test, because they don't stop power gating.
+- The old TUXEDO install ran driver 595.71.05, which is in the range of the open lag report [#1090](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1090), and Plasma 6.6, which had triple buffering off on NVIDIA. 615 has its own regressions (#1391 blanking on memory-clock changes, #1392 hangs after a DP power-cycle). The test bed defaults to the 580 long-term branch.
+- [#650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650) (low fps on dGPU-wired external monitors) is tracked as NVIDIA bug 4830125. NVIDIA has not published a cause or a fix.
+- KWin 6.8.0 attaches the copy's fence to the commit on NVIDIA (IN_FENCE_FD). That is a future A/B once Fedora ships it.
+
+**Static on DP-2**
+- It isn't a marginal DP link. DP scrambling changes the bit pattern of the same picture every frame, so random link errors would twinkle anywhere regardless of content. The record also shows static at 1080p60 and 4K30, where the link has plenty of margin.
+- Static that stays while a window is on DP-2 and changes with it points to something deterministic on that connector's pixel path, or to an event triggered by redraws. On the path, that means NVIDIA's output at 30bpp, or the Thunderbolt/dock DP path.
+- The cable swap only ruled out the cable and the monitor. The GPU head and output, the Thunderbolt tunnel and the dock port all stay tied to the connector.
+- The 8 bpc test is valid. The kernel's EDID override reaches NVIDIA, which then drives the link at 24bpp after a modeset, and `/proc/driver/nvidia-modeset/heads` proves it (`edid-8bpc.sh`, `nv-heads`). The old Ubuntu attempt was only ever checked in sysfs, so it never proved 8 bpc.
+- 615 also has `nvidia-modeset.max_output_color_depth=8`.
+- Never tested and decisive for dock versus GPU side: a direct USB-C→DP cable, and a single monitor on that port.
+
 - `prime-select` never changes which GPU KWin composites on. TUXEDO's Wayland dGPU mode only offloads apps, which adds a second copy.
 
 ## Runs so far
 
-**001-first** (2026-10-20). Fedora KDE 44, KWin 6.7.5, driver 615.78.08 open (installed before the default moved to 580), hybrid mode with Intel compositing, lid open with the built-in display off, both Dells at 4K60. Not yet the Phase 0 app routine.
-- Seen: stutter **no**, static corruption **yes**.
-- Measured: 4.4% (DP-2) and 4.9% (DP-3) of frames late, almost all by one refresh. KWin triple-buffered 95–98% of frames.
-- 94–95% of the late frames were ready in time: rendering *and* the copy to the NVIDIA GPU had finished a median 14–20 ms before the deadline. KWin's render time includes that copy (`multigpuswapchain.cpp` adds its time query to the frame). The delay is therefore in the commit/flip step, which is the NVIDIA driver's side.
-- The late frames come in bursts (21 and 45 bursts, under 250 ms apart).
-- Both Dells go late together. 31 of DP-2's 66 late frames had DP-3 late within one refresh, against about 2.5 by chance. The other way it was 26 of 49, against about 0.8. Chance is measured with the timing shifted 2–10 s, so it keeps the bursts. A GPU-wide event on the NVIDIA side fits that (low-power flip latency, NV 4830125, or a memory-clock change). Slow rendering of one monitor's content doesn't.
-- Open: is this level of lateness below what's noticeable, or does the stutter need the apps from the case (Phase 0)? Does it come back without triple buffering (`a2-tb-off`)? The corruption is there on a current stack too.
+**001-first** (2026-10-20). Fedora KDE 44, KWin 6.7.5, driver 615.78.08 open (installed before the default moved to 580), hybrid mode with Intel compositing, lid open with the built-in display off, both Dells at 4K60. General use, not yet the app routine.
+- Seen: stutter **no**, static **yes**.
+- 4.4% (DP-2) and 4.9% (DP-3) of frames late, almost all by exactly one refresh, in bursts. Triple-buffered 95–98%.
+- DP-2: 40 knock-on, 20 first-after-pause, 21 back-to-back. After a pause 28% late; back-to-back 1.2%.
+- Both Dells late together far above chance (31/66 vs about 2.5). That pattern lives in the back-to-back frames.
 
-**002-0-x11** (2026-10-20). Same setup but driver 580.178.04 open. Despite the name, random apps (Konsole, Dolphin, Firefox are all native Wayland). 60 s.
-- Seen: stutter **not sure**, static **yes**: "Konsole causes static and screen blanking when dragged to DP-2. As does Dolphin. Firefox does not immediately appear to trigger the issue."
-- Measured: 10.6% (DP-2) and 9.5% (DP-3) of frames late. 84% and 93% of them were ready in time, with a median 16–24 ms to spare.
-- Both Dells were late together again: 44 of 78 against about 6 by chance, and 46 of 65 against about 3.
-- Flip times jitter by about 30 µs between frames, so they're when the driver reported each flip, not hardware vblank stamps. Late flips land on the next vblank, 1.0 refresh late (a few 2–4).
-- KWin 6.7 commits a finished frame about 2 ms before vblank (the safety margin). If its buffer's fence isn't signalled then, it moves the frame one refresh later (`drm_commit_thread.cpp`). A frame that finished early can therefore still miss its vblank. That happens if the NVIDIA side signals the copy late, commits slowly, or latches or reports the flip late.
-- Run 002 isn't directly comparable with 001: different driver and different activity.
+**002-0-x11** (2026-10-20). Same, driver 580.178.04 open. Despite the name, random apps (Konsole, Dolphin, Firefox: all native Wayland). 60 s.
+- Seen: stutter **not sure**, static **yes**:
+  - "Konsole causes static and screen blanking when dragged to DP-2. As does Dolphin. Firefox does not immediately appear to trigger the issue."
+  - "The static often stays as long as the window is on the other screen and changes as the window moves or changes. Blanking can occur in conjunction with the static."
+- 10.6% and 9.5% late.
+  - DP-2: 56 knock-on, 47 first-after-pause, 21 back-to-back. After a pause 41% late; back-to-back 2.1%.
+  - DP-3: after a pause 43%; back-to-back 2.0%.
+- The two runs differ in driver *and* activity (run 002 had more pauses), so they don't compare 580 with 615.
+- DP-2 and DP-3 run slightly different modes (59.996 vs 59.997 Hz) although the monitors are identical. Does that follow the port?

@@ -1,0 +1,230 @@
+#!/usr/bin/env bpftrace
+/*
+ * flipfence.bt - separate the late-frame mechanisms on KWin 6.7.5 + nvidia-drm 580/615 (open)
+ * UNTESTED (written without access to the target machine; check every probe with `bpftrace -l`).
+ *
+ * Usage: stuttertest run NAME --trace ... (or by hand:
+ *   sudo bpftrace flipfence.bt $(pidof kwin_wayland) > /var/tmp/flipfence.log
+ *   with $1 = KWin main-thread TID = kwin_wayland PID). Read-only probes; Ctrl-C detaches all.
+ *
+ * Every line starts with nsecs = ktime_get_ns() = CLOCK_MONOTONIC, i.e. the same clock as the
+ * KWin perf CSV (target/pageflip/render columns), so lines can be joined to CSV rows.
+ *
+ * CRTC index -> connector: crtc index == nvidia head (nvidia-drm-crtc.c creates CRTCs in head
+ * order); read the mapping with
+ *   for d in /sys/kernel/debug/dri/*/; do grep -q nvidia-drm $d/name && sudo grep -A1 '^connector\[' $d/state; done
+ * which prints "connector[ID]: DP-2" followed by "crtc=crtc-N"; N is the index used by the
+ * drm:drm_vblank_event_delivered "crtc" field and nv_drm_handle_flip_occurred's head.
+ *
+ * Probes in PART 2 need nvidia symbols. List them first:
+ *   sudo bpftrace -l 'kprobe:nv_drm_*' ; sudo bpftrace -l 'kprobe:nvKms*' ; sudo bpftrace -l 'kprobe:nv*Evo*'
+ * and delete any that are missing if your bpftrace does not support missing_probes.
+ */
+config = { missing_probes = "warn" }
+
+BEGIN { printf("# t_ns EVENT fields  (main tid=%d)\n", $1); }
+
+/* ===================== PART 1: kernel-only probes ===================== */
+
+/* (a) commit-thread readiness check: KWin FileDescriptor::isReadable() = poll(fd,1,0) */
+tracepoint:syscalls:sys_enter_poll
+/ (comm == "DP-2" || comm == "DP-3") && args.nfds == 1 && args.timeout_msecs == 0 /
+{
+  @inpoll[tid] = nsecs;
+}
+
+kprobe:sync_file_poll
+/ @inpoll[tid] /
+{
+  $sf = (struct sync_file *)((struct file *)arg0)->private_data;
+  @pf_ctx[tid] = $sf->fence->context;
+  @pf_seq[tid] = $sf->fence->seqno;
+  /* DMA_FENCE_FLAG_SIGNALED_BIT is bit 3 in v7.2 include/linux/dma-fence.h */
+  @pf_sig[tid] = ($sf->fence->flags >> 3) & 1;
+}
+
+tracepoint:syscalls:sys_exit_poll
+/ @inpoll[tid] /
+{
+  /* ready=0 -> KWin DrmCommitThread reschedules this commit by one refresh */
+  printf("%llu POLL %s ready=%d sigbit=%d fctx=%llu fseq=%llu\n", nsecs, comm, args.ret,
+         @pf_sig[tid], @pf_ctx[tid], @pf_seq[tid]);
+  delete(@inpoll[tid]); delete(@pf_ctx[tid]); delete(@pf_seq[tid]); delete(@pf_sig[tid]);
+}
+
+/* when NVIDIA fences (prime or semaphore-surface) actually signal; timeline names are
+   "nvidia.prime" / "nvidia.semaphore_surface"; context is truncated to 32 bits here */
+tracepoint:dma_fence:dma_fence_signaled
+/ str(args.driver) == "NVIDIA" /
+{
+  printf("%llu FSIG %s ctx=%u seq=%u\n", nsecs, str(args.timeline), args.context, args.seqno);
+}
+
+/* (b) commit ioctl: DRM_IOCTL_MODE_ATOMIC; flags 0x100 TEST_ONLY, 0x200 NONBLOCK, 0x1 PAGE_FLIP_EVENT */
+tracepoint:syscalls:sys_enter_ioctl
+/ args.cmd == 0xc03864bc /
+{
+  @ioc_t[tid] = nsecs;
+  @ioc_f[tid] = *uptr((uint32 *)args.arg);
+}
+
+tracepoint:syscalls:sys_exit_ioctl
+/ @ioc_t[tid] /
+{
+  /* policy 2 == SCHED_RR: shows whether KWin's SCHED_RR request for the commit threads was granted */
+  printf("%llu ATOMIC %s tid=%d flags=0x%x dur_us=%llu ret=%d policy=%d\n", nsecs, comm, tid,
+         @ioc_f[tid], (nsecs - @ioc_t[tid]) / 1000, args.ret, curtask->policy);
+  delete(@ioc_t[tid]); delete(@ioc_f[tid]);
+}
+
+/* implicit (dma-resv WRITE) or explicit (IN_FENCE_FD) fence that the display will wait on */
+kprobe:drm_gem_plane_helper_prepare_fb
+{
+  @pfb[tid] = arg1;
+}
+kretprobe:drm_gem_plane_helper_prepare_fb
+/ @pfb[tid] /
+{
+  $ps = (struct drm_plane_state *)@pfb[tid];
+  if ($ps->fence != 0) {
+    printf("%llu SCANOUT_FENCE %s fctx=%llu fseq=%llu signaled=%d\n", nsecs, comm,
+           $ps->fence->context, $ps->fence->seqno, ($ps->fence->flags >> 3) & 1);
+  }
+  delete(@pfb[tid]);
+}
+
+/* (c) flip completion as KWin sees it. With nvidia-drm.vblank=0 (580 always) the event
+   timestamp is ktime_get() taken just before this tracepoint (drm_vblank.c:1155-1163). */
+tracepoint:drm:drm_vblank_event_delivered
+{
+  printf("%llu FLIPEV crtc=%d seq=%u\n", nsecs, args.crtc, args.seq);
+  if (@evq_first == 0) { @evq_first = nsecs; }
+}
+
+/* only fires when vblank interrupts are enabled (615/610 with nvidia-drm.vblank=1) */
+tracepoint:drm:drm_vblank_event
+{
+  printf("%llu VBLANK crtc=%d seq=%u hwtime=%lld\n", nsecs, args.crtc, args.seq, args.time);
+}
+
+/* (d) main thread picks up the flip event (drmHandleEvent -> read() -> drm_read) */
+kprobe:drm_read
+/ tid == $1 /
+{
+  if (@evq_first != 0) {
+    printf("%llu MAINREAD lag_us=%llu\n", nsecs, (nsecs - @evq_first) / 1000);
+    @evq_first = 0;
+  }
+}
+
+/* who wakes the commit threads (timer expiry vs. kwin_wayland notify after pageFlipped) and
+   how long they wait for a CPU */
+tracepoint:sched:sched_wakeup
+/ args.comm == "DP-2" || args.comm == "DP-3" /
+{
+  @wk[args.pid] = nsecs;
+  printf("%llu WAKE %s by %s/%d\n", nsecs, args.comm, comm, tid);
+}
+tracepoint:sched:sched_switch
+/ @wk[args.next_pid] /
+{
+  $lat = nsecs - @wk[args.next_pid];
+  if ($lat > 200000) { printf("%llu RUNQ_DELAY %s lat_us=%llu\n", nsecs, args.next_comm, $lat / 1000); }
+  delete(@wk[args.next_pid]);
+}
+
+/* main thread long off-CPU periods (blocked or preempted) */
+tracepoint:sched:sched_switch
+/ args.prev_pid == $1 /
+{
+  @off_t = nsecs; @off_state = args.prev_state;
+}
+tracepoint:sched:sched_switch
+/ args.next_pid == $1 && @off_t /
+{
+  $d = nsecs - @off_t;
+  if ($d > 3000000) { printf("%llu MAIN_OFFCPU dur_us=%llu prev_state=%d\n", nsecs, $d / 1000, @off_state); }
+  @off_t = 0;
+}
+
+/* ===================== PART 2: nvidia symbols (verify with bpftrace -l) ===================== */
+
+/* nvidia-drm: driver part of the commit (check = NVKMS validate flip, commit = NVKMS flip) */
+kprobe:nv_drm_atomic_check { @chk[tid] = nsecs; }
+kretprobe:nv_drm_atomic_check / @chk[tid] /
+{
+  printf("%llu NVCHECK %s dur_us=%llu ret=%d\n", nsecs, comm, (nsecs - @chk[tid]) / 1000, retval);
+  delete(@chk[tid]);
+}
+kprobe:nv_drm_atomic_commit { @cmt[tid] = nsecs; }
+kretprobe:nv_drm_atomic_commit / @cmt[tid] /
+{
+  printf("%llu NVCOMMIT %s dur_us=%llu ret=%d\n", nsecs, comm, (nsecs - @cmt[tid]) / 1000, retval);
+  delete(@cmt[tid]);
+}
+
+/* NVKMS flip-occurred event reaches nvidia-drm (just before the DRM event is sent) */
+kprobe:nv_drm_handle_flip_occurred
+{
+  printf("%llu NVFLIPOCC head=%d comm=%s\n", nsecs, arg1, comm);
+}
+
+/* a scanout in-fence signaled late (async callback) -> nvidia-drm releases the display semaphore */
+kprobe:__nv_drm_plane_fence_cb
+{
+  printf("%llu INFENCE_CB comm=%s\n", nsecs, comm);
+}
+
+/* nvidia-modeset: global nvkms_lock wait and hold (nvKmsIoctl runs with nvkms_lock held).
+   NVKMS_IOCTL_FLIP = 15 on 580.178.04, 14 on 615.78.08; GET_NEXT_EVENT = 32 / 31. */
+kprobe:nvkms_ioctl_from_kapi,
+kprobe:nvkms_ioctl_from_kapi_try_pmlock
+{
+  @lk[tid] = nsecs;
+}
+kprobe:nvKmsIoctl
+{
+  @kms[tid] = nsecs; @kcmd[tid] = arg1;
+  if (@lk[tid]) {
+    $w = nsecs - @lk[tid];
+    if ($w > 300000) { printf("%llu NVKMS_LOCKWAIT %s cmd=%d wait_us=%llu\n", nsecs, comm, arg1, $w / 1000); }
+    delete(@lk[tid]);
+  }
+}
+kretprobe:nvKmsIoctl / @kms[tid] /
+{
+  $d = nsecs - @kms[tid];
+  if ($d > 1000000) { printf("%llu NVKMS_SLOW %s cmd=%d held_us=%llu\n", nsecs, comm, @kcmd[tid], $d / 1000); }
+  delete(@kms[tid]); delete(@kcmd[tid]);
+}
+
+/* NVKMS learns the flip completed (deferred work, holds nvkms_lock) */
+kprobe:nvSendFlipOccurredEventEvo
+{
+  printf("%llu NVKMS_FLIPDONE apiHead=%d\n", nsecs, arg1);
+}
+
+/* work that runs under nvkms_lock on the nvidia-modeset kthread and can block flips/events */
+kprobe:nvHandleDPIRQEventDeferredWork { @dpirq = nsecs; }
+kretprobe:nvHandleDPIRQEventDeferredWork / @dpirq /
+{
+  printf("%llu DP_IRQ_WORK dur_us=%llu\n", nsecs, (nsecs - @dpirq) / 1000); @dpirq = 0;
+}
+kprobe:nvHandleHotplugEventDeferredWork { @hpd = nsecs; }
+kretprobe:nvHandleHotplugEventDeferredWork / @hpd /
+{
+  printf("%llu HPD_WORK dur_us=%llu\n", nsecs, (nsecs - @hpd) / 1000); @hpd = 0;
+}
+/* synchronous IMP (bandwidth) update done before a flip that needs higher usage bounds */
+kprobe:nvDoIMPUpdateEvo { @imp[tid] = nsecs; }
+kretprobe:nvDoIMPUpdateEvo / @imp[tid] /
+{
+  printf("%llu IMP_SYNC_UPDATE %s dur_us=%llu\n", nsecs, comm, (nsecs - @imp[tid]) / 1000);
+  delete(@imp[tid]);
+}
+
+END
+{
+  clear(@inpoll); clear(@pf_ctx); clear(@pf_seq); clear(@pf_sig); clear(@ioc_t); clear(@ioc_f);
+  clear(@pfb); clear(@wk); clear(@chk); clear(@cmt); clear(@lk); clear(@kms); clear(@kcmd); clear(@imp);
+}

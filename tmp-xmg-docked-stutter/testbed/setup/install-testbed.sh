@@ -17,7 +17,7 @@ NV_PCI=0000:01:00.0
 
 log "Linking tools into $BIN"
 run mkdir -p "$BIN"
-for t in stuttertest kwin-perf-summary stutter-analyze nv-powermizer dgpu-run; do
+for t in stuttertest kwin-perf-summary stutter-analyze nv-heads nv-powermizer dgpu-run; do
     run ln -sfn "$TB/bin/$t" "$BIN/$t"
 done
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: $BIN is not in PATH yet; open a new terminal or log out and in" ;; esac

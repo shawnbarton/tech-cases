@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""What the NVIDIA display engine is actually sending to each monitor.
+
+  nv-heads             one line per active head: connector, mode, pixel depth
+  nv-heads --depth DP-2   just the depth for one connector (e.g. "30bpp 4:4:4")
+
+Reads /proc/driver/nvidia-modeset/heads and dpys (NVKMS's own view: '30bpp' means
+10 bits per colour on the link, '24bpp' 8 bits) and matches each NVKMS display to
+its DRM connector (card0-DP-2 ...) by the EDID serial number. The sysfs EDID and
+KWin only show DRM's copy, not what the hardware runs. Reading these files takes
+the driver's global lock, so don't run this during a timed stuttertest run.
+"""
+import glob
+import os
+import re
+import sys
+
+PROC = os.environ.get("NV_PROCDIR", "/proc/driver/nvidia-modeset")
+SYS = os.environ.get("SETUP_SYS", "/sys")
+NV_PCI = "0000:01:00.0"
+
+
+def edid_facts(b):
+    """(serial, bpc) from EDID bytes; bpc from byte 20 of a digital EDID 1.4."""
+    if len(b) < 128 or bytes(b[:8]) != bytes.fromhex("00ffffffffffff00"):
+        return None, None
+    bpc = {1: 6, 2: 8, 3: 10, 4: 12, 5: 14, 6: 16}.get((b[20] >> 4) & 7) if b[20] & 0x80 else None
+    serial = None
+    for off in range(54, 126, 18):
+        d = b[off:off + 18]
+        if bytes(d[:3]) == b"\0\0\0" and d[3] == 0xFF:
+            serial = bytes(d[5:18]).split(b"\n")[0].decode("ascii", "replace").strip()
+    if not serial:
+        serial = "%08x" % int.from_bytes(bytes(b[12:16]), "little")
+    return serial, bpc
+
+
+def read(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except OSError as e:
+        sys.exit(f"nv-heads: can't read {path} ({e.strerror}); is nvidia-modeset loaded?")
+
+
+def parse_dpys(text):
+    """NVKMS display name -> EDID bytes."""
+    out, name, collecting = {}, None, False
+    for line in text.splitlines():
+        m = re.match(r"\s+dpy\s+:\s+(.*)$", line)
+        if m:
+            name, collecting = m.group(1).strip(), False
+            continue
+        if re.match(r"\s+edid\s+:", line):
+            collecting = True
+            out[name] = []
+            continue
+        if collecting and re.fullmatch(r"(\s+[0-9a-f]{2})+\s*", line):
+            out[name].extend(int(x, 16) for x in line.split())
+        elif collecting:
+            collecting = False
+    return out
+
+
+def parse_heads(text):
+    """[(head, NVKMS display name, mode, depth)] for active heads."""
+    heads, cur = [], None
+    for line in text.splitlines():
+        m = re.match(r"\s+head (\d+)\s+:\s+(.*)$", line)
+        if m:
+            cur = None
+            if m.group(2).strip() != "inactive":
+                cur = {"head": int(m.group(1)), "name": m.group(2).strip(), "mode": "?", "depth": "?"}
+                heads.append(cur)
+            continue
+        m = re.match(r"\s+(mode|depth)\s+:\s+(.*)$", line)
+        if m and cur:
+            cur[m.group(1)] = m.group(2).strip()
+    return heads
+
+
+def drm_connectors():
+    """EDID serial -> DRM connector name, for connectors on the NVIDIA GPU."""
+    out = {}
+    for d in glob.glob(f"{SYS}/bus/pci/devices/{NV_PCI}/drm/card*/card*-*"):
+        try:
+            b = open(os.path.join(d, "edid"), "rb").read()
+        except OSError:
+            continue
+        serial, _ = edid_facts(b)
+        if serial:
+            out[serial] = re.sub(r"^card\d+-", "", os.path.basename(d))
+    return out
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    edids = parse_dpys(read(os.path.join(PROC, "dpys")))
+    heads = parse_heads(read(os.path.join(PROC, "heads")))
+    conns = drm_connectors()
+    rows = []
+    for h in heads:
+        serial, bpc = edid_facts(edids.get(h["name"], []))
+        conn = conns.get(serial, "?")
+        rows.append((conn, h, bpc))
+    if argv and argv[0] == "--depth":
+        want = argv[1] if len(argv) > 1 else ""
+        for conn, h, _ in rows:
+            if conn == want:
+                print(h["depth"])
+                return 0
+        return 1
+    if not rows:
+        print("no active NVIDIA heads")
+    for conn, h, bpc in sorted(rows, key=lambda r: r[0]):
+        print(f"{conn:6} head {h['head']}  {h['mode']:28} {h['depth']:12} "
+              f"(EDID in the driver: {bpc if bpc else '?'} bpc; {h['name']})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

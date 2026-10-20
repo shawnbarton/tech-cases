@@ -4,9 +4,16 @@
   stutter-analyze RUN_DIR
 
 For each monitor:
-- late frames, and how many were "ready but flipped late"
-  (rendering incl. the multi-GPU copy finished before the deadline; the
-  delay is then in the commit/flip step, not in rendering),
+- late frames by kind: knock-on (planned before the previous late frame landed),
+  first frame after a pause (no flip for 1+ refreshes) or back-to-back, and how
+  many brought new content. A late frame that only repeats the picture already
+  on screen is invisible; one that delays new content is a visible hitch.
+  (A render span under 2 ms means KWin composited nothing new: its GL timing
+  has a 2 ms floor.)
+- how many late frames had finished rendering before the deadline by KWin's
+  clock. That rules out slow rendering. It doesn't prove the frame was ready
+  for the NVIDIA side: KWin's render time leaves out the copy's wait on the
+  Intel fence and the time NVIDIA takes to signal the copy done.
 - whether late frames come in bursts.
 Across monitors: how often late frames on one monitor coincide with late
 frames on the other, compared with chance. A shared cause (GPU-wide power
@@ -46,6 +53,35 @@ def load(path):
 
 def is_late(r):
     return r["pageflip timestamp"] - r["target pageflip timestamp"] > r["refresh duration"] / 2
+
+
+def classify(rows):
+    """Counts of late frames by kind, plus late rates after a pause vs back-to-back."""
+    c = dict(late=0, knock=0, pause=0, b2b=0, new=0, pause_frames=0, b2b_frames=0)
+    prev = None
+    for r in rows:
+        ref = r["refresh duration"]
+        late = is_late(r)
+        knock = prev is not None and is_late(prev) and r["target pageflip timestamp"] <= prev["pageflip timestamp"] + 500_000
+        pause = prev is not None and (r["target pageflip timestamp"] - prev["pageflip timestamp"]) >= 1.5 * ref
+        if not knock and prev is not None:
+            c["pause_frames" if pause else "b2b_frames"] += 1
+        if late:
+            c["late"] += 1
+            if r["render end"] - r["render start"] >= 2_000_000:
+                c["new"] += 1
+            if knock:
+                c["knock"] += 1
+            elif pause:
+                c["pause"] += 1
+            elif prev is not None:
+                c["b2b"] += 1
+        prev = r
+    return c
+
+
+def pct(a, b):
+    return f"{100 * a / b:.1f}%" if b else "-"
 
 
 def bursts(times, gap_ns):
@@ -189,7 +225,13 @@ def main(argv):
         b = bursts(late[name], int(0.25e9))
         multi = [x for x in b if len(x) > 1]
         print(f"{name}: {len(rows)} frames, {len(lr)} late ({100 * len(lr) / len(rows):.1f}%)")
-        print(f"   ready but flipped late: {ready}/{len(lr)} (median {slack:.1f} ms to spare before the deadline)")
+        c = classify(rows)
+        print(f"   kinds: {c['knock']} knock-on, {c['pause']} first after a pause, {c['b2b']} back-to-back; "
+              f"{c['new']} of {c['late']} delayed new content (visible hitches)")
+        print(f"   late rate after a pause: {c['pause']}/{c['pause_frames']} ({pct(c['pause'], c['pause_frames'])}); "
+              f"back-to-back: {c['b2b']}/{c['b2b_frames']} ({pct(c['b2b'], c['b2b_frames'])})")
+        print(f"   rendering done in time: {ready}/{len(lr)} (median {slack:.1f} ms before the deadline; rules out slow "
+              f"rendering, not a slow NVIDIA side)")
         print(f"   in bursts: {sum(len(x) for x in multi)}/{len(lr)} late frames in {len(multi)} bursts "
               f"(late frames < 250 ms apart); {len(b)} separate episodes in "
               f"{(rows[-1]['pageflip timestamp'] - rows[0]['pageflip timestamp']) / 1e9:.0f} s")

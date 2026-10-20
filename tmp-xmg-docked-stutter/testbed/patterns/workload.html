@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stutter Workload</title>
+<style>
+  :root { --bg: #1d1f21; --fg: #e8e8e8; --accent: #4f9cf9; --muted: #8a8f98; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #info { position: fixed; left: 12px; top: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info"></div>
+<script>
+// The same screen activity for every test run, so runs can be compared frame for frame.
+// A fixed 60 s loop: single small updates after pauses of 33-700 ms (the frames that come
+// late most often), then short bursts of continuous animation (back-to-back frames).
+// Open one window on each Dell, keep the mouse still, and run stuttertest for 120 s.
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const info = document.getElementById('info');
+const LOOP_MS = 60000;
+
+function rng(seed) { let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+// Build the loop once: [startMs, kind, durationMs]
+const plan = (() => {
+  const r = rng(2026), gaps = [33, 50, 67, 100, 150, 250, 400, 700], out = [];
+  let t = 0;
+  while (t < LOOP_MS - 3000) {
+    for (let i = 0; i < 12 && t < LOOP_MS - 3000; i++) {        // a run of single updates
+      t += gaps[Math.floor(r() * gaps.length)];
+      out.push([t, 'tick', 0]);
+    }
+    const len = 500 + Math.floor(r() * 1500);                   // then a burst of animation
+    out.push([t + 50, 'burst', len]);
+    t += 50 + len + 200;
+  }
+  return out;
+})();
+
+let start = performance.now(), tick = 0, burstUntil = 0, burstFrom = 0;
+function size() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(innerWidth * dpr); canvas.height = Math.round(innerHeight * dpr);
+}
+function draw(now) {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#1d1f21'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#e8e8e8';
+  ctx.font = `${Math.round(h / 12)}px monospace`;
+  ctx.fillText(String(tick).padStart(6, '0'), w * 0.1, h * 0.45);
+  if (now < burstUntil) {
+    const x = ((now - burstFrom) / 1000 * w * 0.5) % w;
+    ctx.fillStyle = '#4f9cf9'; ctx.fillRect(x, h * 0.6, w * 0.08, h * 0.08);
+  }
+  const loopT = ((now - start) % LOOP_MS) / 1000;
+  info.textContent = `loop ${Math.floor((now - start) / LOOP_MS) + 1}  ·  ${loopT.toFixed(1)} s / 60 s  ·  keep the mouse still`;
+}
+function animate(now) { draw(now); if (now < burstUntil) requestAnimationFrame(animate); }
+function schedule(loopStart) {
+  for (const [at, kind, len] of plan) {
+    setTimeout(() => {
+      const now = performance.now();
+      tick++;
+      if (kind === 'burst') { burstFrom = now; burstUntil = now + len; requestAnimationFrame(animate); }
+      else requestAnimationFrame(draw);
+    }, Math.max(0, loopStart + at - performance.now()));
+  }
+  setTimeout(() => schedule(loopStart + LOOP_MS), Math.max(0, loopStart + LOOP_MS - performance.now() - 500));
+}
+addEventListener('resize', () => { size(); draw(performance.now()); });
+size(); draw(start); schedule(start);
+</script>
+</body>
+</html>

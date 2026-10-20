@@ -6,11 +6,14 @@
 #   stuttertest kwin show                  login-script settings vs. the running session
 #   stuttertest kwin install               install the login script into Plasma's env dir
 #   stuttertest kwin set KEY=VALUE...      gpu=default|nvidia  tb=default|on|off  margin=default|<us>
-#                                          perf=on|off  lidcheck=on|off   (then log out and in)
+#                                          cursor=default|sw  repaint=default|full  perf=on|off  lidcheck=on|off
+#                                          (then log out and in)
 #   stuttertest run NAME [options]         measure one test while you use the desktop, then
 #                                          record whether you saw stutter / static corruption
 #       --clock LIST   comma-separated: none, mem[=MHz], gr[=MHz], pm-consistent, pm-max,
 #                      p0 (load that holds the NVIDIA GPU at full power), p0ctl (same load on the Intel GPU)
+#       --trace        also record a kernel trace of KWin's commits and NVIDIA's flip events
+#                      (bpftrace, root, testbed/trace/flipfence.bt); not together with --smi
 #       --smi          also log nvidia-smi P-state/clocks every 500 ms (adds GPU polling);
 #                      outside Plasma (GNOME, COSMIC) this is the only measurement
 #       --duration N   stop after N seconds instead of waiting for Enter
@@ -32,6 +35,7 @@ ENVFILE=$HOME/.config/plasma-workspace/env/50-kwin-docked-gpu.sh
 ENVSRC=$HERE/../kwin/50-kwin-docked-gpu.sh
 SUMMARY=$HERE/kwin-perf-summary
 ANALYZE=$HERE/stutter-analyze
+NV_HEADS=$HERE/nv-heads
 POWERMIZER=$HERE/nv-powermizer
 DGPU_RUN=$HERE/dgpu-run
 NV_PCI=0000:01:00.0
@@ -182,6 +186,9 @@ cmd_info() {
         for s in /sys/class/drm/card*-*/status; do echo "${s%/status} $(cat "$s")"; done | sed 's#/sys/class/drm/##'
         if have kscreen-doctor; then kscreen-doctor -o 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; fi
         echo "docked: $(docked && echo yes || echo no)   AC: $(systemd-ac-power 2>/dev/null && echo yes || echo no)   lid: $(lid_state)"
+        echo "What the NVIDIA display engine sends (30bpp = 10 bits per colour, 24bpp = 8):"
+        "$NV_HEADS" 2>&1 | sed 's/^/  /'
+        echo "EDID file override: boot '$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^drm.edid_firmware=//p')'  now '$(cat /sys/module/drm/parameters/edid_firmware 2>/dev/null)'"
         echo; echo "== KWin session"
         echo "render GPU: $(render_gpu)"
         echo "KWIN_* in running KWin (from the $(kwin_env_source)):"; kwin_env | sed 's/^/  /'
@@ -202,6 +209,19 @@ cmd_info() {
 }
 
 # ---------------------------------------------------------------- kwin
+
+# The installed login script predates a setting: install the current one, keeping its values.
+upgrade_envfile() {
+    local line tmp
+    tmp=$(mktemp)
+    cp "$ENVSRC" "$tmp"
+    while IFS= read -r line; do
+        grep -q "^${line%%=*}=" "$tmp" && sed -i "s|^${line%%=*}=.*|$line|" "$tmp"
+    done < <(grep '^KD_[A-Z_]*=' "$ENVFILE")
+    install -m 0644 "$tmp" "$ENVFILE"
+    rm -f "$tmp"
+    echo "updated $ENVFILE to the current version (settings kept)"
+}
 
 cmd_kwin() {
     local sub=${1:-show}; shift || true
@@ -229,11 +249,16 @@ cmd_kwin() {
                     perf=off) var=KD_PERF_LOG; val= ;;
                     lidcheck=on) var=KD_REQUIRE_LID_CLOSED; val=1 ;;
                     lidcheck=off) var=KD_REQUIRE_LID_CLOSED; val= ;;
+                    cursor=default) var=KD_SW_CURSOR; val= ;;
+                    cursor=sw) var=KD_SW_CURSOR; val=1 ;;
+                    repaint=default) var=KD_FULL_REPAINT; val= ;;
+                    repaint=full) var=KD_FULL_REPAINT; val=1 ;;
                     margin=default) var=KD_SAFETY_MARGIN; val= ;;
                     margin=[0-9]*) case $v in *[!0-9]*) die "margin must be microseconds: '$v'" ;; esac
                                    var=KD_SAFETY_MARGIN; val=$v ;;
-                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off margin=default|<us> perf=on|off lidcheck=on|off)" ;;
+                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off margin=default|<us> cursor=default|sw repaint=default|full perf=on|off lidcheck=on|off)" ;;
                 esac
+                grep -q "^$var=" "$ENVFILE" || upgrade_envfile
                 sed -i "s/^$var=.*/$var=$val/" "$ENVFILE"
             done
             cmd_kwin show
@@ -254,6 +279,7 @@ cmd_kwin() {
 APPLIED=()
 LOAD_PID=
 SMI_PID=
+TRACE_PID=
 PM_ORIG=
 CLOCK_NOTES=()
 
@@ -313,6 +339,44 @@ reset_clocks() {
     APPLIED=()
     [ -n "$SMI_PID" ] && kill "$SMI_PID" 2>/dev/null
     SMI_PID=
+    stop_trace
+}
+
+# The trace runs as root through sudo, started as a background job, which a script starts
+# with SIGINT ignored: signal bpftrace itself (it installs its own SIGINT handler, prints its
+# last lines and detaches), and fall back to SIGTERM. TRACE_PID is sudo's process, owned by
+# root, so check it through /proc rather than kill -0.
+stop_trace() {
+    local i
+    [ -n "$TRACE_PID" ] || return 0
+    sudo pkill -INT -f 'bpftrace .*flipfence\.bt' 2>/dev/null
+    for i in 1 2 3 4 5 6 7 8 9 10; do [ -d "/proc/$TRACE_PID" ] || break; sleep 0.5; done
+    [ -d "/proc/$TRACE_PID" ] && sudo pkill -TERM -f 'bpftrace .*flipfence\.bt' 2>/dev/null
+    wait "$TRACE_PID" 2>/dev/null
+    TRACE_PID=
+}
+
+# CRTC index (the 'crtc' of the trace's FLIPEV lines) -> connector, from DRM's debugfs state.
+crtc_map() {
+    local d
+    for d in $(sudo sh -c 'ls -d /sys/kernel/debug/dri/*/' 2>/dev/null); do
+        sudo grep -qs "$NV_PCI" "${d}name" || continue
+        sudo grep -A1 '^connector\[' "${d}state" 2>/dev/null
+        return 0
+    done
+}
+
+start_trace() {
+    local rd=$1 bt=$HERE/../trace/flipfence.bt pid
+    have bpftrace || die "bpftrace is missing: sudo dnf install bpftrace"
+    pid=$(kwin_pid) || die "--trace needs KWin running"
+    sudo -v || die "--trace needs sudo"
+    crtc_map > "$rd/crtc-map.txt"
+    sudo bpftrace "$bt" "$pid" > "$rd/trace.log" 2> "$rd/trace.err" &
+    TRACE_PID=$!
+    sleep 4    # attaching the probes takes a moment
+    [ -d "/proc/$TRACE_PID" ] || { TRACE_PID=; die "bpftrace stopped; see $rd/trace.err"; }
+    echo "kernel trace running ($(grep -c . "$rd/trace.err" 2>/dev/null) lines of bpftrace messages so far, in trace.err)"
 }
 
 cmd_reset() {
@@ -369,11 +433,12 @@ EOF
 }
 
 cmd_run() {
-    local name='' clock=none smi='' duration='' force=''
+    local name='' clock=none smi='' duration='' force='' trace=''
     while [ $# -gt 0 ]; do
         case $1 in
             --clock) clock=${2:?}; shift ;;
             --smi) smi=1 ;;
+            --trace) trace=1 ;;
             --duration) duration=${2:?}; shift ;;
             --force) force=1 ;;
             -*) die "unknown option $1" ;;
@@ -381,12 +446,14 @@ cmd_run() {
         esac
         shift
     done
-    [ -n "$name" ] || die "usage: stuttertest run NAME [--clock LIST] [--smi] [--duration N]"
+    [ -n "$name" ] || die "usage: stuttertest run NAME [--clock LIST] [--smi|--trace] [--duration N]"
     case $name in *[!A-Za-z0-9._-]*) die "NAME may only contain letters, digits, . _ -" ;; esac
+    [ -z "$trace" ] || [ -z "$smi" ] || die "--trace and --smi in the same run would disturb each other; pick one"
 
     local kwin=1
     if ! kwin_pid >/dev/null; then
         [ -n "$smi" ] || die "kwin_wayland is not running in your session (outside Plasma, use --smi)"
+        [ -z "$trace" ] || die "--trace needs KWin (Plasma)"
         kwin=
     elif ! kwin_env | grep -q '^KWIN_LOG_PERFORMANCE_DATA=1'; then
         die "KWin frame logging is off (no KWIN_LOG_PERFORMANCE_DATA=1 in the $(kwin_env_source)). Run 'stuttertest kwin set perf=on', make sure the Dells are connected, then log out and back in. 'stuttertest info' shows the details."
@@ -414,6 +481,8 @@ cmd_run() {
     margin=$(kwin_env | sed -n 's/^KWIN_DRM_OVERRIDE_SAFETY_MARGIN=//p')
     if [ -n "$kwin" ]; then
         kcfg="tb=$tb${margin:+,margin=$margin}"
+        kwin_env | grep -q '^KWIN_FORCE_SW_CURSOR=1' && kcfg="$kcfg,swcursor"
+        kwin_env | grep -q '^KWIN_USE_BUFFER_AGE=0' && kcfg="$kcfg,fullrepaint"
         gpu=$(render_gpu | cut -c1-40)
     else
         kcfg="no-kwin:${XDG_CURRENT_DESKTOP:-?}"
@@ -436,6 +505,7 @@ cmd_run() {
     for c in "${clocks[@]}"; do apply_clock "$c"; done
     for c in "${CLOCK_NOTES[@]}"; do echo "applied:$c" >> "$rd/meta.txt"; done
 
+    [ -n "$trace" ] && start_trace "$rd"
     if [ -n "$smi" ]; then
         nvidia-smi -i "$SMI_ID" --query-gpu=timestamp,pstate,clocks.mem,clocks.gr,power.draw --format=csv,noheader,nounits -lms 500 > "$rd/smi.csv" 2>/dev/null &
         SMI_PID=$!
@@ -552,6 +622,7 @@ EOF
     fi
     [ "$pstates" != - ] && echo "nvidia-smi: $pstates"
     echo "X11 apps open: $x11"
+    [ -s "$rd/trace.log" ] && echo "kernel trace: $(grep -c . "$rd/trace.log") lines (trace.log; CRTC map in crtc-map.txt)"
     [ -s "$rd/marks.txt" ] && echo "static marked: $(wc -l < "$rd/marks.txt") times"
     local lg
     for lg in kernel kwin; do
@@ -603,5 +674,5 @@ case ${1:-} in
     analyze) shift; cmd_analyze "$@" ;;
     mark) shift; cmd_mark "$@" ;;
     reset) cmd_reset ;;
-    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

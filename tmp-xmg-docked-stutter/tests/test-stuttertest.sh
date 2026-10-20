@@ -49,6 +49,18 @@ EOS
 printf '#!/bin/sh\n[ "$1" = -v ] && exit 0\n[ "$1" = -n ] && shift\nexec "$@"\n' > "$T/fakebin/sudo"
 printf '#!/bin/sh\nprintf "method return\\n   string \\"KWin Support Information:\\nOpenGL vendor string: NVIDIA Corporation\\nOpenGL renderer string: NVIDIA GeForce RTX 4070 Laptop GPU/PCIe/SSE2\\nOpenGL version string: 4.6.0\\"\\n"\n' > "$T/fakebin/dbus-send"
 printf '#!/bin/sh\nexit 0\n' > "$T/fakebin/systemd-ac-power"
+cat > "$T/fakebin/bpftrace" <<'EOS'
+#!/usr/bin/env python3
+# Like bpftrace: installs its own SIGINT handler (even when started with SIGINT ignored).
+import signal, sys, time
+def stop(*_):
+    print(f"{time.monotonic_ns()} END", flush=True); sys.exit(0)
+signal.signal(signal.SIGINT, stop)
+print("Attaching 40 probes...", file=sys.stderr, flush=True)
+print(f"# t_ns EVENT fields  (main tid={sys.argv[2]})", flush=True)
+while True:
+    print(f"{time.monotonic_ns()} FLIPEV crtc=0 seq=0", flush=True); time.sleep(0.2)
+EOS
 printf '#!/bin/sh\nprintf "host  /usr/bin/Discord --type=x\\nhost  xeyes\\n"\n' > "$T/fakebin/xlsclients"
 cat > "$T/fakebin/journalctl" <<'EOS'
 #!/bin/sh
@@ -106,6 +118,10 @@ XPID=$!
 printf 'n\ny\nkonsole drag to DP-2\n' | "$ST" run s-marks --duration 4 2>&1 | grep -E '===|X11 apps|static marked|log during|Marks|t\+|log [+-]|marks had' | show
 kill $XPID 2>/dev/null
 cat "$T"/home/stuttertest/runs/*-s-marks/marks.txt | cut -d' ' -f2-
+echo "### --trace (fake bpftrace), and refusing --trace with --smi"
+printf 'n\nn\n\n' | "$ST" run t-trace --trace --duration 2 2>&1 | grep -E 'kernel trace|===' | show
+tail -2 "$T"/home/stuttertest/runs/*-t-trace/trace.log | cut -d' ' -f2-
+"$ST" run t-both --trace --smi --duration 1 2>&1 | tail -1 | show
 echo "### applied values recorded"; grep -h '^applied:' "$T"/home/stuttertest/runs/*/meta.txt | show
 kill $KPID; sleep 0.5
 echo "### outside Plasma without --smi -> refuse"; "$ST" run h-gnome --duration 1 2>&1 | show
