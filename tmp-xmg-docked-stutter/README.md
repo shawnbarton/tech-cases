@@ -13,6 +13,7 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
 | `testbed/setup/install-testbed.sh` | Installs the tools and KWin login script, sets Adaptive Sync to Never on the Dells, fixes the power profile |
 | `testbed/bin/stuttertest` | Test harness: system report, KWin settings, timed test runs with per-test frame statistics, results table |
 | `testbed/bin/kwin-perf-summary` | Summarizes KWin's frame timing log (`KWIN_LOG_PERFORMANCE_DATA`) into late frames and render time |
+| `testbed/bin/stutter-analyze` | Where a run's late frames come from: rendering vs. after rendering, bursts, both monitors at once vs. chance, P-state changes (`stuttertest analyze`) |
 | `testbed/bin/nv-powermizer` | Gets or sets the NVIDIA PowerMizer mode through NVML. Works on Wayland (driver ≥ 580.65.06) |
 | `testbed/bin/dgpu-run` | Runs a program on the NVIDIA GPU (PRIME render offload) |
 | `testbed/kwin/50-kwin-docked-gpu.sh` | Plasma login script: triple buffering, compositing GPU, safety margin, frame log (docked only) |
@@ -27,3 +28,13 @@ Working folder for diagnosing desktop stutter on an XMG Fusion 15 (E24), i9-1490
   - KWin before 6.7.3 disabling triple buffering on NVIDIA-driven outputs. The old TUXEDO install ran Plasma 6.6.
 - Driver 595.58.03 and later have an open report of lag on NVIDIA-wired monitors of KDE laptops ([#1090](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1090)), and 615 has open multi-monitor regressions (#1391, #1392). The test bed therefore defaults to the 580 long-term branch and uses 615 only as a comparison.
 - `prime-select` never changes which GPU KWin composites on. TUXEDO's Wayland dGPU mode only offloads apps, which adds a second copy.
+
+## Runs so far
+
+**001-first** (2026-10-20). Fedora KDE 44, KWin 6.7.5, driver 615.78.08 open (installed before the default moved to 580), hybrid mode with Intel compositing, lid open with the built-in display off, both Dells at 4K60. Not yet the Phase 0 app routine.
+- Seen: stutter **no**, static corruption **yes**.
+- Measured: 4.4% (DP-2) and 4.9% (DP-3) of frames late, almost all by one refresh. KWin triple-buffered 95–98% of frames.
+- 94–95% of the late frames were ready in time: rendering *and* the copy to the NVIDIA GPU had finished a median 14–20 ms before the deadline. KWin's render time includes that copy (`multigpuswapchain.cpp` adds its time query to the frame). The delay is therefore in the commit/flip step, which is the NVIDIA driver's side.
+- The late frames come in bursts (21 and 45 bursts, under 250 ms apart).
+- Both Dells go late together. 31 of DP-2's 66 late frames had DP-3 late within one refresh, against about 2.5 by chance. The other way it was 26 of 49, against about 0.8. Chance is measured with the timing shifted 2–10 s, so it keeps the bursts. A GPU-wide event on the NVIDIA side fits that (low-power flip latency, NV 4830125, or a memory-clock change). Slow rendering of one monitor's content doesn't.
+- Open: is this level of lateness below what's noticeable, or does the stutter need the apps from the case (Phase 0)? Does it come back without triple buffering (`a2-tb-off`)? The corruption is there on a current stack too.

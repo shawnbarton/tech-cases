@@ -39,7 +39,7 @@ echo "\$*" >> "$T/smi-calls"
 case "\$*" in
   *query-supported-clocks=memory*) printf '8001\n8001\n7001\n6001\n810\n405\n' ;;
   *clocks.max.graphics*) echo 2475 ;;
-  *-lms*) i=0; while [ \$i -lt 50 ]; do echo "2026/10/19 12:00:00.000, P\$((i % 2 * 3)), \$((8001 - i % 2 * 2000)), 900, 20.5"; i=\$((i+1)); sleep 0.5; done ;;
+  *-lms*) i=0; while [ \$i -lt 50 ]; do echo "\$(date '+%Y/%m/%d %H:%M:%S.%3N'), P\$((i / 3 % 2 * 3)), \$((8001 - i / 3 % 2 * 2000)), 900, 20.5"; i=\$((i+1)); sleep 0.5; done ;;
   *driver_version*) echo 615.78.08 ;;
   *pstate,clocks.mem,clocks.gr*) echo "P5, 6001 MHz, 900 MHz" ;;
   -q) echo "    GSP Firmware Version                  : 615.78.08" ;;
@@ -60,7 +60,7 @@ EOS
 printf '#!/bin/sh\necho "glxgears env: offload=$__NV_PRIME_RENDER_OFFLOAD vendor=$__GLX_VENDOR_LIBRARY_NAME prime=$DRI_PRIME" >> "%s/smi-calls"\nexec sleep 60\n' "$T" > "$T/fakebin/glxgears"
 chmod +x "$T/fakebin/"*
 mkdir -p "$T/tb/bin" "$T/tb/kwin"
-cp "$TBD/bin/stuttertest" "$TBD/bin/kwin-perf-summary" "$TBD/bin/dgpu-run" "$T/tb/bin/"
+cp "$TBD/bin/stuttertest" "$TBD/bin/kwin-perf-summary" "$TBD/bin/stutter-analyze" "$TBD/bin/dgpu-run" "$T/tb/bin/"
 cp "$TBD/kwin/50-kwin-docked-gpu.sh" "$T/tb/kwin/"
 cat > "$T/tb/bin/nv-powermizer" <<EOS
 #!/bin/sh
@@ -90,6 +90,7 @@ echo "### bad input"; "$ST" run 'bad name' 2>&1 | show; "$ST" run x --clock turb
 echo "### KWin /proc entries root-only (Fedora: CAP_SYS_NICE) -> systemd env + working dir"
 STUTTERTEST_NO_PROC=1 "$ST" info 2>/dev/null | grep -E 'KWIN_\* in running|KWIN_LOG|frame logs open' | show
 printf 'n\nn\n\n' | STUTTERTEST_NO_PROC=1 "$ST" run a1-noproc --duration 2 2>&1 | grep -E '===|perf-|error|stuttertest:' | show
+echo "### analyze (last run, then by name)"; "$ST" analyze | show; "$ST" analyze a3-mem | grep -E '^==|nvidia-smi' | show; "$ST" analyze nope 2>&1 | show
 echo "### applied values recorded"; grep -h '^applied:' "$T"/home/stuttertest/runs/*/meta.txt | show
 kill $KPID; sleep 0.5
 echo "### outside Plasma without --smi -> refuse"; "$ST" run h-gnome --duration 1 2>&1 | show

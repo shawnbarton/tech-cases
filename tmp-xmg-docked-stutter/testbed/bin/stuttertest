@@ -16,6 +16,7 @@
 #       --duration N   stop after N seconds instead of waiting for Enter
 #       --force        run even if the nvidia-clockfloor service holds a lock
 #   stuttertest report                     table of all runs
+#   stuttertest analyze [RUN]              where the late frames come from (default: last run)
 #   stuttertest reset                      undo any clock lock, PowerMizer mode or load
 #
 # Results go to ~/stuttertest (override with STUTTERTEST_DIR).
@@ -26,6 +27,7 @@ DATA=${STUTTERTEST_DIR:-$HOME/stuttertest}
 ENVFILE=$HOME/.config/plasma-workspace/env/50-kwin-docked-gpu.sh
 ENVSRC=$HERE/../kwin/50-kwin-docked-gpu.sh
 SUMMARY=$HERE/kwin-perf-summary
+ANALYZE=$HERE/stutter-analyze
 POWERMIZER=$HERE/nv-powermizer
 DGPU_RUN=$HERE/dgpu-run
 NV_PCI=0000:01:00.0
@@ -420,8 +422,9 @@ cmd_run() {
         SMI_PID=$!
     fi
 
-    local t0 t1
-    t0=$(mono_ns)
+    local t0 t1 t0wall
+    read -r t0 t0wall < <(python3 -c 'import time; print(time.monotonic_ns(), time.time())')
+    { echo "t0_mono_ns=$t0"; echo "t0_wall=$t0wall"; } >> "$rd/meta.txt"
     echo
     echo ">>> Test '$name' running: do the routine (TESTBED.md section 4) on the docked monitors."
     if [ -n "$duration" ]; then
@@ -506,6 +509,7 @@ EOF
         echo "note: some frames used adaptive sync; set Adaptive Sync to Never for triple-buffering comparisons"
     fi
     [ "$pstates" != - ] && echo "nvidia-smi: $pstates"
+    [ -n "$any" ] && { echo "--- details"; "$ANALYZE" "$rd" | tail -n +2; }
     echo "saved: $rd"
     RUN_DONE=1
 }
@@ -525,6 +529,17 @@ finish_run() {
     fi
 }
 
+cmd_analyze() {
+    local rd
+    case ${1:-} in
+        '') rd=$(ls -d "$DATA"/runs/[0-9]*/ 2>/dev/null | tail -1) ;;
+        */*) rd=$1 ;;
+        *) rd=$(ls -d "$DATA/runs/$1"*/ "$DATA/runs/"[0-9]*-"$1"/ 2>/dev/null | tail -1) ;;
+    esac
+    [ -n "$rd" ] && [ -d "$rd" ] || die "no such run: ${1:-(none yet)}"
+    "$ANALYZE" "$rd"
+}
+
 cmd_report() {
     [ -e "$DATA/results.tsv" ] || die "no runs yet"
     if have column; then column -t -s $'\t' "$DATA/results.tsv"; else cat "$DATA/results.tsv"; fi
@@ -535,6 +550,7 @@ case ${1:-} in
     kwin) shift; cmd_kwin "$@" ;;
     run) shift; cmd_run "$@" ;;
     report) cmd_report ;;
+    analyze) shift; cmd_analyze "$@" ;;
     reset) cmd_reset ;;
-    *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

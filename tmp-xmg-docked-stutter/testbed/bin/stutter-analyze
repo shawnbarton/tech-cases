@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Deeper look at one stuttertest run: where the late frames come from.
+
+  stutter-analyze RUN_DIR
+
+For each monitor:
+- late frames, and how many were "ready but flipped late"
+  (rendering incl. the multi-GPU copy finished before the deadline; the
+  delay is then in the commit/flip step, not in rendering),
+- whether late frames come in bursts.
+Across monitors: how often late frames on one monitor coincide with late
+frames on the other, compared with chance. A shared cause (GPU-wide power
+state or memory-clock change, late flip events) hits both at once; slow
+rendering of one monitor's content does not.
+With smi.csv (stuttertest run --smi): P-state / memory-clock changes near
+each burst.
+"""
+import bisect
+import csv
+import datetime
+import glob
+import os
+import statistics
+import sys
+
+
+def load(path):
+    rows = []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if None in r or None in r.values():
+                continue
+            try:
+                row = {k: int(v) for k, v in r.items()}
+            except ValueError:
+                continue
+            if 1_000_000 <= row["refresh duration"] <= 1_000_000_000:
+                rows.append(row)
+    return rows
+
+
+def is_late(r):
+    return r["pageflip timestamp"] - r["target pageflip timestamp"] > r["refresh duration"] / 2
+
+
+def bursts(times, gap_ns):
+    """Group sorted timestamps into bursts separated by more than gap_ns."""
+    out = []
+    for t in times:
+        if out and t - out[-1][-1] <= gap_ns:
+            out[-1].append(t)
+        else:
+            out.append([t])
+    return out
+
+
+def near(arr, t, w):
+    i = bisect.bisect_left(arr, t - w)
+    return i < len(arr) and arr[i] <= t + w
+
+
+def read_meta(run):
+    meta = {}
+    try:
+        for line in open(os.path.join(run, "meta.txt")):
+            k, _, v = line.rstrip("\n").partition("=")
+            meta.setdefault(k, v)
+    except OSError:
+        pass
+    return meta
+
+
+def smi_changes(run, meta):
+    """(monotonic_ns, description) for each P-state or memory-clock change."""
+    path = os.path.join(run, "smi.csv")
+    if not os.path.exists(path) or "t0_mono_ns" not in meta or "t0_wall" not in meta:
+        return None
+    offset = float(meta["t0_wall"]) - int(meta["t0_mono_ns"]) / 1e9   # wall = mono + offset
+    out, prev = [], None
+    for line in open(path):
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            wall = datetime.datetime.strptime(parts[0], "%Y/%m/%d %H:%M:%S.%f").timestamp()
+        except ValueError:
+            continue
+        state = (parts[1], parts[2])
+        if prev is not None and state != prev:
+            out.append((int((wall - offset) * 1e9), f"{prev[0]}/{prev[1]} -> {state[0]}/{state[1]} MHz"))
+        prev = state
+    return out
+
+
+def main(argv):
+    if len(argv) != 1 or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 2
+    run = argv[0]
+    files = sorted(glob.glob(os.path.join(run, "perf-*.csv")))
+    if not files:
+        print(f"{run}: no perf-*.csv files")
+        return 1
+    meta = read_meta(run)
+    data = {os.path.basename(f)[5:-4]: load(f) for f in files}
+    data = {k: v for k, v in data.items() if v}
+    late = {}
+    print(f"== {os.path.basename(os.path.normpath(run))}: clock={meta.get('clock', '?')} "
+          f"kwin={meta.get('kwin_config', '?')} driver={meta.get('driver', '?')} "
+          f"stutter={meta.get('stutter', '?')}")
+    for name, rows in data.items():
+        lr = [r for r in rows if is_late(r)]
+        late[name] = sorted(r["target pageflip timestamp"] for r in lr)
+        if not lr:
+            print(f"{name}: {len(rows)} frames, none late")
+            continue
+        ready = sum(1 for r in lr if r["render end"] <= r["target pageflip timestamp"] - r["safety margin"])
+        slack = statistics.median((r["target pageflip timestamp"] - r["render end"]) / 1e6 for r in lr)
+        b = bursts(late[name], int(0.25e9))
+        multi = [x for x in b if len(x) > 1]
+        print(f"{name}: {len(rows)} frames, {len(lr)} late ({100 * len(lr) / len(rows):.1f}%)")
+        print(f"   ready but flipped late: {ready}/{len(lr)} (median {slack:.1f} ms to spare before the deadline)")
+        print(f"   in bursts: {sum(len(x) for x in multi)}/{len(lr)} late frames in {len(multi)} bursts "
+              f"(late frames < 250 ms apart); {len(b)} separate episodes in "
+              f"{(rows[-1]['pageflip timestamp'] - rows[0]['pageflip timestamp']) / 1e9:.0f} s")
+    names = [n for n in data if late.get(n)]
+    if len(names) >= 2:
+        print("Across monitors (late within one refresh of a late frame on the other):")
+        for a in names:
+            for b_ in names:
+                if a == b_:
+                    continue
+                ref = statistics.median(r["refresh duration"] for r in data[b_])
+                frames_b = sorted(r["target pageflip timestamp"] for r in data[b_])
+                lo = max(data[a][0]["target pageflip timestamp"], frames_b[0])
+                hi = min(data[a][-1]["target pageflip timestamp"], frames_b[-1])
+                if hi - lo < 20e9:
+                    continue
+                # only late frames on a while b was also drawing (b idles when nothing changes on it)
+                cand = [t for t in late[a] if lo <= t <= hi and near(frames_b, t, ref)]
+                lb = [t for t in late[b_] if lo <= t <= hi]
+                both = sum(1 for t in cand if near(lb, t, ref))
+                # chance level: the same count with b's late frames shifted in time by 2-10 s
+                # (wrapping around), which keeps their burstiness but breaks any real link
+                span = hi - lo
+                shifts = [int(s * 1e9) for s in (2, 2.7, 3.3, 4.1, 5, 5.9, 6.6, 7.4, 8.3, 9.1, 10)]
+                chance = statistics.mean(
+                    sum(1 for t in cand if near(sorted(lo + (x - lo + sh) % span for x in lb), t, ref))
+                    for sh in shifts + [-x for x in shifts])
+                print(f"   {a} late -> {b_} also late: {both}/{len(cand)} (by chance ~{chance:.1f})")
+    changes = smi_changes(run, meta)
+    if changes is not None:
+        allb = bursts(sorted(t for n in names for t in late[n]), int(0.25e9))
+        hit = sum(1 for x in allb if any(x[0] - 1e9 <= c <= x[-1] + 1e9 for c, _ in changes))
+        print(f"nvidia-smi: {len(changes)} P-state/memory-clock changes; {hit}/{len(allb)} late episodes had one within 1 s")
+        for c, d in changes[:15]:
+            print(f"   t+{(c - int(meta['t0_mono_ns'])) / 1e9:6.1f}s  {d}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -70,6 +70,7 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
 
 - `stuttertest run NAME [--clock …] --duration 90` measures one test while you use the desktop. It then shows, per monitor, the late frames, missed refreshes and the share of frames KWin triple-buffered. It asks whether you saw stutter and whether you saw static/corruption (yes/no), plus an optional one-line note. The terminal beeps when the time is up.
 - The late-frame count is the measurement. It also says *how much* stutter there was when the answer is yes. Your yes/no is the cross-check that the numbers match what you see. Corruption is the separate dock-port bug, recorded per run for free in case it follows a driver or setting.
+- After the per-monitor summary a run prints **details**: how many late frames were ready in time (so the delay came after rendering), whether they come in bursts, and how often both Dells were late at the same moment compared with chance. `stuttertest analyze [RUN]` shows the same for any earlier run.
 - `stuttertest report` compares all runs. The results are in `~/stuttertest/`.
 - **The routine** is normal use of the applications where you see the stutter, on the Dells. Phase 0 (§5) pins down which ones. Once chosen, keep it the same for every run (90 s):
   1. 30 s: the app that showed it most: scroll, switch views, type.
@@ -176,6 +177,7 @@ Then switch the BIOS back to **Hybrid**.
 **Phase V, optional: video playback (the separate I8 problem).** Only if video matters to you. Play the same local 4K file windowed (`mpv --loop --geometry=50%x50% <file>`) in Phase A and Phase B setups, as `v-a` and `v-b`. Phase B removes the Intel→NVIDIA copy for video too.
 
 **How to read the results:**
+- **Details: "ready but flipped late" near 100%, and both monitors late together far more often than "by chance":** the frames were rendered and copied in time, and something GPU-wide on the NVIDIA side delayed the flip (power state, memory clock, late flip events). Run 001 looked like this. If instead the late frames weren't ready, and the monitors are late independently, the time goes into rendering or the copy: compare Phase B. The logged flip time is when the driver *reported* the flip, so a late report and a late flip look the same in the log. Your yes/no tells them apart.
 - **`a2-tb-off` clearly worse than `a1`:** triple buffering matters. Plasma ≥ 6.7.3 is the fix; your old TUXEDO install (6.6.x) lacked it. If the triple-buffered share stays near 0% in `a1`, triple buffering never engaged and this comparison tells you nothing.
 - **`p0` fixes it and `p0ctl` doesn't:** it's NVIDIA's low-power latency (NV 4830125). That is evidence for [open-gpu-kernel-modules #650](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/650), and the workaround is a held clock or load while docked.
 - **A lock or PowerMizer mode fixes it:** make it automatic with `testbed/clockfloor/install.sh`. Set `/etc/default/nvidia-clockfloor` to what the winning run used (`MEM_LOCK=<value>`, `GR_MIN=900`, or `METHOD=powermizer PM_MODE=max|consistent`), then `sudo systemctl start nvidia-clockfloor.service`. It only applies while docked on AC.
