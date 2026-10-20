@@ -94,6 +94,7 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 **DP-2's path has an MST hub.**
 - NVIDIA names DP-2's monitor `DELL S2721QS (DP-0.2)`. An address suffix means NVKMS sees it behind a DisplayPort branch device (`nvAllocDpyEvo` adds it to `displayPortMSTIds`). DP-3's monitor is `(DP-2)`, without one.
 - That matches `card0-DP-1` showing "disconnected": that's the physical port in MST mode, and `DP-2` is the stream behind it.
-- So the two dock ports differ: one goes through an MST hub, the other doesn't. The record's "no MST" was wrong for that port.
+- Both Dells are cabled to the dock identically and look the same in KDE. The difference is inside one socket's path: it goes through an MST hub, the other's doesn't. The record's "no MST" was wrong for that socket. You can see it with `cat /proc/driver/nvidia-modeset/dpys`.
+- Where the hub sits is open: most likely inside the dock, possibly on the laptop side. With the DP-2 Dell on a direct USB-C→DP cable, `nv-heads` decides it: if the name loses the `.2`, the hub is in the dock.
 - A similar, earlier NVIDIA bug (forum 155374, about 2021): content-dependent static on Thunderbolt docks, "only affects Multi Stream Transport setups", root-caused and fixed by NVIDIA at the time.
 - MST connectors are created dynamically, so after a re-plug the name `DP-2` could change. If the static ever returns, check `edid-8bpc.sh status` for the current names.
