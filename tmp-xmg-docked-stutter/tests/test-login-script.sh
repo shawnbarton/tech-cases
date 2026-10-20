@@ -47,12 +47,12 @@ echo disconnected > "$T/sys/class/drm/card1-DP-2/status"; echo disconnected > "$
 sed -i 's/^KD_SAFETY_MARGIN=.*/KD_SAFETY_MARGIN=3000/' "$T/env.sh"; run "undocked, margin set -> not applied"
 printf '%-52s [%s]\n' "stdout while sourcing (must be empty)" "$(dash -c ". '$T/env.sh'" 2>/dev/null)"
 echo connected > "$T/sys/class/drm/card1-DP-2/status"
-mk "" "" 1; sed -i -e 's/^KD_SW_CURSOR=.*/KD_SW_CURSOR=1/' -e 's/^KD_FULL_REPAINT=.*/KD_FULL_REPAINT=1/' "$T/env.sh"
-printf '%-52s %s\n' "docked, software cursor + full repaint" "$(dash -c "set -u; . '$T/env.sh'; echo \"SWC=[\${KWIN_FORCE_SW_CURSOR-unset}] AGE=[\${KWIN_USE_BUFFER_AGE-unset}] leaked=[\${KD_SW_CURSOR-}\${KD_FULL_REPAINT-}]\"" 2>&1)"
+mk "" "" 1; sed -i -e 's/^KD_SW_CURSOR=.*/KD_SW_CURSOR=1/' -e 's/^KD_FULL_REPAINT=.*/KD_FULL_REPAINT=1/' -e 's/^KD_UDMABUF=.*/KD_UDMABUF=1/' "$T/env.sh"
+printf '%-52s %s\n' "docked, software cursor + full repaint + udmabuf" "$(dash -c "set -u; . '$T/env.sh'; echo \"SWC=[\${KWIN_FORCE_SW_CURSOR-unset}] AGE=[\${KWIN_USE_BUFFER_AGE-unset}] UDMABUF=[\${KWIN_DISABLE_UDMABUF_IMPORT-unset}] leaked=[\${KD_SW_CURSOR-}\${KD_FULL_REPAINT-}\${KD_UDMABUF-}]\"" 2>&1)"
 echo disconnected > "$T/sys/class/drm/card1-DP-2/status"
 printf '%-52s %s\n' "undocked, same settings -> not applied" "$(dash -c "set -u; . '$T/env.sh'; echo \"SWC=[\${KWIN_FORCE_SW_CURSOR-unset}] AGE=[\${KWIN_USE_BUFFER_AGE-unset}]\"" 2>&1)"
 
 # stuttertest kwin set on an installed login script from before a setting existed: upgrade, keep values
 H=$T/home; mkdir -p "$H/.config/plasma-workspace/env"
-grep -v -e '^KD_SW_CURSOR=' -e '^KD_FULL_REPAINT=' "$TBD/kwin/50-kwin-docked-gpu.sh" | sed 's/^KD_SAFETY_MARGIN=.*/KD_SAFETY_MARGIN=3000/' > "$H/.config/plasma-workspace/env/50-kwin-docked-gpu.sh"
-HOME=$H STUTTERTEST_NO_PROC=1 bash "$TBD/bin/stuttertest" kwin set cursor=sw 2>&1 | grep -E 'updated|KD_SAFETY|KD_SW|KD_FULL' | sed "s#$T##g"
+grep -v -e '^KD_SW_CURSOR=' -e '^KD_FULL_REPAINT=' -e '^KD_UDMABUF=' "$TBD/kwin/50-kwin-docked-gpu.sh" | sed 's/^KD_SAFETY_MARGIN=.*/KD_SAFETY_MARGIN=3000/' > "$H/.config/plasma-workspace/env/50-kwin-docked-gpu.sh"
+HOME=$H STUTTERTEST_NO_PROC=1 bash "$TBD/bin/stuttertest" kwin set cursor=sw 2>&1 | grep -E 'updated|KD_SAFETY|KD_SW|KD_FULL|KD_UDMABUF' | sed "s#$T##g"

@@ -96,6 +96,7 @@ Optional, any time: `./03-sessions.sh` adds COSMIC and GNOME sessions and keeps 
   - `margin=<µs>|default`: the safety margin before each refresh
   - `cursor=default|sw`: hardware cursor plane, or the cursor drawn into each frame
   - `repaint=default|full`: repaint only what changed, or every frame in full
+  - `udmabuf=default|on`: let KWin pass CPU-drawn windows (Konsole, Dolphin) to the GPU without a copy on its main thread
   - `lidcheck=on|off` and `perf=on|off`
 - **Clock settings apply only during the run** and are reset afterwards:
   - `mem[=MHz]`: memory clock lock (default: the highest supported)
@@ -275,6 +276,17 @@ stuttertest run t1-w --trace --duration 120            # with the two workload w
 ```
 Send the run folder (`trace.log`, `trace.err`, `crtc-map.txt`). If bpftrace stops at the start, `trace.err` says why; send that too.
 
+**Occasional cursor hitches in daily use** (triple buffering on). Try these one at a time, each for a day or so of normal use, in this order:
+1. **Mouse on the laptop, not the dock.** The dock's USB ports reach the laptop through the Thunderbolt link's PCIe tunnel, which your record saw power-managing itself at idle (ASPM L1, 2.5 GT/s). Plug the mouse, or its receiver, into a USB port on the laptop itself. Free to try, nothing to undo.
+2. **Software cursor:** `stuttertest kwin set cursor=sw`, then log out and in. The cursor is drawn into each frame instead of moved on its own cursor plane; NVIDIA reports those cursor-plane moves as done immediately, which can throw off KWin's frame timing. It costs a little GPU work. Undo: `cursor=default`.
+3. **Larger safety margin:** `stuttertest kwin set cursor=default margin=3500`, log out and in. KWin then hands each frame to NVIDIA about 2.5 ms earlier, which helps if the first flip after a pause is the late one. It costs that much latency. Undo: `margin=default`.
+4. **Only if the hitches come while Konsole, Dolphin or other Qt apps are busy:**
+   - Check the prerequisites: `rpm -q qt6-qtbase` must show 6.11.2 or newer, and `/dev/udmabuf` must exist (`ls -l /dev/udmabuf`).
+   - Then `stuttertest kwin set udmabuf=on`, and log out and in.
+   - KWin keeps this off on Intel and NVIDIA because of glitches on some systems, so watch for odd window contents. Undo: `udmabuf=default`.
+
+To measure instead of judging by feel: Phase A's `a1-w-mouse` against `a5-w-swcursor-mouse` (step 2) and `a4-w-margin` (step 3).
+
 **Phase B: hybrid mode, NVIDIA composites.** Set `stuttertest kwin set gpu=nvidia`, keep the same lid state (lid closed, or `lidcheck=off` as above), log out and in. `stuttertest info` must show an NVIDIA render GPU.
 ```
 stuttertest run b1 --duration 90
@@ -342,7 +354,7 @@ Then switch the BIOS back to **Hybrid**.
 - **Driver 615 (Phase E only) and monitor power-cycles:** after a DisplayPort monitor power-cycles behind a dock or hub, KWin can hang waiting on the GPU firmware ([#1392](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1392); one report is an RTX 4070 laptop in hybrid mode). That includes automatic screen-off, which `install-testbed.sh` turns off on AC. If it hits:
   1. Press Alt+SysRq + S, U, B, a few seconds apart. `01-base.sh` enables exactly these three; holding the power button also works.
   2. After the reboot, go back to the default with `./02-nvidia.sh 580-open` and skip the rest of Phase E.
-- **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default cursor=default repaint=default`.
+- **A login breaks after a `stuttertest kwin set` change:** unplug the dock and log in (the login script does nothing undocked), then `stuttertest kwin set gpu=default tb=default margin=default cursor=default repaint=default udmabuf=default`.
 - **The Dells stay black after `edid-8bpc.sh boot`:**
   1. Open the lid: the built-in display doesn't use the override, and run `testbed/setup/fedora/edid-8bpc.sh boot-off`, then reboot.
   2. Or, at power-on, hold Shift (or press Esc) to show the GRUB menu. Press `e`, delete `drm.edid_firmware=...` from the `linux` line, and press Ctrl+X. Then run `boot-off`.

@@ -39,6 +39,12 @@ KD_SW_CURSOR=
 # compositing, KWin still copies just the changed area to the NVIDIA GPU.
 KD_FULL_REPAINT=
 
+# 1 = let KWin hand CPU-drawn windows (Konsole, Dolphin: shared-memory buffers) to the
+# GPU without copying them on its main thread (KWIN_DISABLE_UDMABUF_IMPORT=0). KWin turns
+# this off by default on Intel and NVIDIA ("glitches on some systems"). Needs /dev/udmabuf
+# and apps that support it (Qt 6.11.2+).
+KD_UDMABUF=
+
 # 1 = while docked, write per-output frame timing CSVs ("kwin perf statistics
 # <output>.csv") to the home directory. KWin overwrites them at each login.
 KD_PERF_LOG=
@@ -46,7 +52,8 @@ KD_PERF_LOG=
 # Plasma copies the session environment into the systemd user manager, so a value
 # removed here could survive from an earlier login. Clear what this file manages.
 systemctl --user unset-environment KWIN_DRM_DEVICES KWIN_DRM_DISABLE_TRIPLE_BUFFERING \
-    KWIN_DRM_OVERRIDE_SAFETY_MARGIN KWIN_FORCE_SW_CURSOR KWIN_USE_BUFFER_AGE KWIN_LOG_PERFORMANCE_DATA >/dev/null 2>&1
+    KWIN_DRM_OVERRIDE_SAFETY_MARGIN KWIN_FORCE_SW_CURSOR KWIN_USE_BUFFER_AGE KWIN_DISABLE_UDMABUF_IMPORT \
+    KWIN_LOG_PERFORMANCE_DATA >/dev/null 2>&1
 
 kd_nv=/dev/dri/by-path/pci-0000:01:00.0-card
 kd_ig=/dev/dri/by-path/pci-0000:00:02.0-card
@@ -103,8 +110,12 @@ if [ "$KD_FULL_REPAINT" = 1 ] && [ -n "$kd_docked" ]; then
     export KWIN_USE_BUFFER_AGE=0
 fi
 
+if [ "$KD_UDMABUF" = 1 ] && [ -n "$kd_docked" ]; then
+    export KWIN_DISABLE_UDMABUF_IMPORT=0
+fi
+
 if [ "$KD_PERF_LOG" = 1 ] && [ -n "$kd_docked" ]; then
     export KWIN_LOG_PERFORMANCE_DATA=1
 fi
 
-unset kd_nv kd_ig kd_card kd_s kd_docked kd_ok kd_ver kd_lib kd_l kd_list KD_GPU KD_REQUIRE_LID_CLOSED KD_TRIPLE_BUFFERING KD_SAFETY_MARGIN KD_SW_CURSOR KD_FULL_REPAINT KD_PERF_LOG
+unset kd_nv kd_ig kd_card kd_s kd_docked kd_ok kd_ver kd_lib kd_l kd_list KD_GPU KD_REQUIRE_LID_CLOSED KD_TRIPLE_BUFFERING KD_SAFETY_MARGIN KD_SW_CURSOR KD_FULL_REPAINT KD_UDMABUF KD_PERF_LOG

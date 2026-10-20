@@ -128,3 +128,4 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - **Stutter:** Plasma ≥ 6.7.3 with triple buffering at its default (Fedora 44: 6.7.5). Residual late frames (1–6%) remain from the NVIDIA side; the Phase A margin and cursor tests may trim them.
 - **Static on DP-2:** 8 bpc on the Dells (`edid-8bpc.sh boot DP-2 DP-3`, checked with `status`). DP-2's path goes through an MST hub, and 30bpp output over it brings the static.
 - **Driver:** stay on the 580 branch (RPM Fusion `580xx`). 595+ has open lag reports for this kind of setup (#1090), and 615 the dock hang (#1392).
+- **Occasional cursor hitch in daily use:** see TESTBED.md, "Occasional cursor hitches". In order: mouse on the laptop rather than the dock, software cursor, larger safety margin, and udmabuf for CPU-drawn apps.

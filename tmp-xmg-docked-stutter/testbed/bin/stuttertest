@@ -6,7 +6,8 @@
 #   stuttertest kwin show                  login-script settings vs. the running session
 #   stuttertest kwin install               install the login script into Plasma's env dir
 #   stuttertest kwin set KEY=VALUE...      gpu=default|nvidia  tb=default|on|off  margin=default|<us>
-#                                          cursor=default|sw  repaint=default|full  perf=on|off  lidcheck=on|off
+#                                          cursor=default|sw  repaint=default|full  udmabuf=default|on
+#                                          perf=on|off  lidcheck=on|off
 #                                          (then log out and in)
 #   stuttertest run NAME [options]         measure one test while you use the desktop, then
 #                                          record whether you saw stutter / static corruption
@@ -265,10 +266,12 @@ cmd_kwin() {
                     cursor=sw) var=KD_SW_CURSOR; val=1 ;;
                     repaint=default) var=KD_FULL_REPAINT; val= ;;
                     repaint=full) var=KD_FULL_REPAINT; val=1 ;;
+                    udmabuf=default) var=KD_UDMABUF; val= ;;
+                    udmabuf=on) var=KD_UDMABUF; val=1 ;;
                     margin=default) var=KD_SAFETY_MARGIN; val= ;;
                     margin=[0-9]*) case $v in *[!0-9]*) die "margin must be microseconds: '$v'" ;; esac
                                    var=KD_SAFETY_MARGIN; val=$v ;;
-                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off margin=default|<us> cursor=default|sw repaint=default|full perf=on|off lidcheck=on|off)" ;;
+                    *) die "unknown setting '$kv' (gpu=default|nvidia tb=default|on|off margin=default|<us> cursor=default|sw repaint=default|full udmabuf=default|on perf=on|off lidcheck=on|off)" ;;
                 esac
                 grep -q "^$var=" "$ENVFILE" || upgrade_envfile
                 sed -i "s/^$var=.*/$var=$val/" "$ENVFILE"
@@ -507,6 +510,7 @@ cmd_run() {
         kcfg="tb=$tb${margin:+,margin=$margin}"
         kwin_env | grep -q '^KWIN_FORCE_SW_CURSOR=1' && kcfg="$kcfg,swcursor"
         kwin_env | grep -q '^KWIN_USE_BUFFER_AGE=0' && kcfg="$kcfg,fullrepaint"
+        kwin_env | grep -q '^KWIN_DISABLE_UDMABUF_IMPORT=0' && kcfg="$kcfg,udmabuf"
         gpu=$(render_gpu | cut -c1-40)
     else
         kcfg="no-kwin:${XDG_CURRENT_DESKTOP:-?}"
@@ -698,5 +702,5 @@ case ${1:-} in
     analyze) shift; cmd_analyze "$@" ;;
     mark) shift; cmd_mark "$@" ;;
     reset) cmd_reset ;;
-    *) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
