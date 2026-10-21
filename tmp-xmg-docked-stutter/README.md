@@ -128,5 +128,11 @@ Checked against KWin 6.7.5/6.8.0 and NVIDIA 580.178.04/615.78.08 source, with sk
 - **Stutter:** Plasma ≥ 6.7.3 with triple buffering at its default (Fedora 44: 6.7.5). Residual late frames (1–6%) remain from the NVIDIA side; the Phase A margin and cursor tests may trim them.
 - **Static on DP-2:** 8 bpc on the Dells (`edid-8bpc.sh boot DP-2 DP-3`, checked with `status`). DP-2's path goes through an MST hub, and 30bpp output over it brings the static.
 - **Driver:** stay on the 580 branch (RPM Fusion `580xx`). 595+ has open lag reports for this kind of setup (#1090), and 615 the dock hang (#1392).
+- **Open (2026-10-21): two unexplained blanks on DP-3**, the landscape monitor on the direct socket (no hub, 30bpp, never had static).
+  - One came after switching to NVIDIA compositing; the other's timing is unclear.
+  - Suspects:
+    - NVIDIA power-state or memory-clock changes, now that the dGPU composites. Cf. #1391 on 615: blanks on memory-clock changes during redraws, worked around by locking the memory clock.
+    - 30bpp on DP-3.
+  - Next: `stuttertest logs`, then `edid-8bpc.sh try DP-3`. If it blanks again at 24bpp: nvkmsdebug, a memory-clock lock, or `gpu=default` for comparison.
 - **Low frame rate in the Overview:** probably the Intel GPU at its limit with two 4K screens; candidate fix NVIDIA compositing (`gpu=nvidia`, TESTBED.md "Low frame rate in the Overview").
 - **Occasional cursor hitch in daily use:** see TESTBED.md, "Occasional cursor hitches". In order: mouse on the laptop rather than the dock, software cursor, larger safety margin, and udmabuf for CPU-drawn apps.
